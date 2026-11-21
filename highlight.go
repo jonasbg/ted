@@ -99,6 +99,11 @@ func newTheme(name string) *Theme {
 	if st == nil || st == styles.Fallback {
 		st = styles.Get("catppuccin-mocha")
 	}
+	return themeFromStyle(st)
+}
+
+// themeFromStyle derives the full UI palette from a syntax style.
+func themeFromStyle(st *chroma.Style) *Theme {
 	t := &Theme{name: st.Name, cs: st, cache: map[chroma.TokenType]tokStyle{}}
 	bgE := st.Get(chroma.Background)
 	bg := color.NRGBA{0x1e, 0x1e, 0x2e, 0xff}
@@ -137,13 +142,9 @@ func newTheme(name string) *Theme {
 	// the window reads as one surface; only the sidebar is a touch deeper.
 	t.tabBar = bg
 	t.statusBg = bg
-	if t.light {
-		t.sidebar = mixC(bg, black, 0.03)
-	} else {
-		t.sidebar = mixC(bg, black, 0.14)
-	}
-	t.sideSel = mixC(t.sidebar, accent, 0.22)
-	t.hover = mixC(t.sidebar, toward, 0.06)
+	t.sidebar = bg // one surface: the panels share the editor background
+	t.sideSel = mixC(t.sidebar, accent, 0.2)
+	t.hover = mixC(t.sidebar, toward, 0.05)
 	t.panel = mixC(bg, toward, 0.06)
 	t.panel2 = mixC(bg, toward, 0.12)
 	t.border = mixC(bg, fg, 0.14)
@@ -163,11 +164,9 @@ func newTheme(name string) *Theme {
 	t.diffDel = mixC(bg, t.gitDel, 0.14)
 	t.diffHunk = mixC(bg, accent, 0.1)
 	t.orange = color.NRGBA{0xf8, 0xa8, 0x4a, 0xff}
+	t.activityBg = bg
 	if t.light {
 		t.orange = color.NRGBA{0xe0, 0x82, 0x10, 0xff}
-		t.activityBg = mixC(bg, black, 0.05)
-	} else {
-		t.activityBg = mixC(bg, black, 0.26)
 	}
 	return t
 }

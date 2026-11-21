@@ -387,6 +387,10 @@ func (a *App) editorKey(gtx layout.Context, b *Buffer, e key.Event) {
 			b.backspace()
 		}
 	case key.NameDeleteForward:
+		if shift && !word && !sc {
+			a.copy(gtx, b, true) // Shift+Delete cuts (Omarchy's Super+X sends it)
+			return
+		}
 		if word && !b.hasSel() {
 			b.deleteRange(b.cur, b.wordMove(b.cur, 1), "")
 		} else {

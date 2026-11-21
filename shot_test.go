@@ -626,3 +626,56 @@ func TestSourceControlViews(t *testing.T) {
 		t.Fatal("clicking the active icon should hide the panel")
 	}
 }
+
+func TestMinimap(t *testing.T) {
+	root, _ := os.Getwd()
+	h := newHarness(t, root, filepath.Join(root, "overlay.go"))
+	h.settle()
+	m := &h.a.mm
+	if m.rect.Empty() {
+		t.Fatal("minimap not shown")
+	}
+	b := h.a.buf()
+	if b.vy != 0 {
+		t.Fatalf("vy=%v", b.vy)
+	}
+	// clicking near the bottom jumps down the file
+	h.click(m.rect.Min.X+20, m.rect.Max.Y-20)
+	if b.vy <= 0 {
+		t.Fatal("click on minimap did not scroll")
+	}
+	jumped := b.vy
+	jumpedTo := func(*Buffer) float32 { return jumped }
+	// press near the top jumps back up; dragging down from there scrolls down
+	p0 := f32.Pt(float32(m.rect.Min.X+20), float32(m.rect.Min.Y+40))
+	h.r.Queue(pointer.Event{Kind: pointer.Press, Source: pointer.Mouse, Buttons: pointer.ButtonPrimary, Position: p0})
+	h.frame()
+	afterPress := b.vy
+	h.r.Queue(pointer.Event{Kind: pointer.Move, Source: pointer.Mouse, Buttons: pointer.ButtonPrimary, Position: f32.Pt(p0.X, p0.Y+300)})
+	h.frame()
+	h.r.Queue(pointer.Event{Kind: pointer.Release, Source: pointer.Mouse, Position: f32.Pt(p0.X, p0.Y+300)})
+	h.frame()
+	if afterPress >= jumpedTo(b) || b.vy <= afterPress {
+		t.Fatalf("press near top %v, after drag down %v", afterPress, b.vy)
+	}
+	if b.hasSel() {
+		t.Fatal("minimap interaction selected text")
+	}
+	h.shot("17-minimap")
+
+	// the viewport box hides when idle and shows on scroll or hover
+	gtx := layout.Context{Now: time.Now()}
+	h.a.scrollAt = time.Now().Add(-5 * time.Second)
+	if v := h.a.scrollVisibility(gtx, false); v != 0 {
+		t.Fatalf("idle visibility %v, want 0", v)
+	}
+	if v := h.a.scrollVisibility(gtx, true); v != 1 {
+		t.Fatalf("hover visibility %v, want 1", v)
+	}
+	ed := h.a.ui.text
+	h.r.Queue(pointer.Event{Kind: pointer.Scroll, Source: pointer.Mouse, Position: f32.Pt(float32(ed.Min.X+50), float32(ed.Min.Y+50)), Scroll: f32.Pt(0, 60)})
+	h.frame()
+	if v := h.a.scrollVisibility(layout.Context{Now: time.Now()}, false); v != 1 {
+		t.Fatalf("visibility right after scrolling %v, want 1", v)
+	}
+}

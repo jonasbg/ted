@@ -360,9 +360,9 @@ func (a *App) drawChanges(gtx layout.Context, list image.Rectangle) {
 		row := image.Rect(list.Min.X, y, list.Max.X, y+rowH)
 		switch {
 		case i == s.sel && a.focus == focusTree:
-			fill(ops, row, th.sideSel)
+			rowBg(gtx, row, th.sideSel)
 		case i == s.hover:
-			fill(ops, row, th.hover)
+			rowBg(gtx, row, th.hover)
 		}
 		handCursor(ops, row)
 		bl := a.uiBaseline(y, rowH)
@@ -472,9 +472,9 @@ func (a *App) drawHistory(gtx layout.Context, list image.Rectangle) {
 		row := image.Rect(list.Min.X, y, list.Max.X, y+rowH)
 		switch {
 		case i == s.histSel && a.focus == focusTree:
-			fill(ops, row, th.sideSel)
+			rowBg(gtx, row, th.sideSel)
 		case i == s.hover:
-			fill(ops, row, th.hover)
+			rowBg(gtx, row, th.hover)
 		}
 		handCursor(ops, row)
 		// timeline

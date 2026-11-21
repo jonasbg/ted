@@ -87,6 +87,15 @@ type App struct {
 	noSession bool
 	socket    string
 
+	mm minimapState
+
+	omarchy    *omarchyTheme // set when following the Omarchy desktop theme
+	themeFixed bool          // --theme or TED_THEME was given
+
+	scrollAt      time.Time // last time the editor view scrolled
+	lastVy        float32
+	lastScrollBuf *Buffer
+
 	sideView int // sideFiles, sideChanges or sideHistory
 	scm      scmState
 
@@ -546,6 +555,7 @@ func (a *App) drainPending() {
 		case tickEvent:
 			a.tickN++
 			a.checkDisk()
+			a.checkOmarchyTheme()
 			if a.tickN%2 == 0 {
 				a.tree.refresh()
 				a.refreshGit()

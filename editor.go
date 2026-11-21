@@ -28,6 +28,10 @@ func (a *App) drawEditor(gtx layout.Context, b *Buffer) {
 	gutterW := (digits+3)*charW + gtx.Dp(6)
 	u.gutter = image.Rect(r.Min.X, r.Min.Y, r.Min.X+gutterW, r.Max.Y)
 	u.text = image.Rect(r.Min.X+gutterW, r.Min.Y, r.Max.X, r.Max.Y)
+	minimap := a.showMinimap(gtx, r.Dx())
+	if minimap {
+		u.text.Max.X -= gtx.Dp(minimapDp)
+	}
 	viewH := r.Dy()
 	textW := u.text.Dx() - u.padLeft - gtx.Dp(14)
 	maxVy := float32(max(0, (len(b.lines)-1)*lineH))
@@ -62,6 +66,12 @@ func (a *App) drawEditor(gtx layout.Context, b *Buffer) {
 	}
 	b.vy = max(0, min(b.vy, maxVy))
 	b.vx = max(0, min(b.vx, maxVx))
+	if b != a.lastScrollBuf || b.vy != a.lastVy {
+		if b == a.lastScrollBuf {
+			a.scrollAt = gtx.Now // the view moved: show scroll indicators
+		}
+		a.lastScrollBuf, a.lastVy = b, b.vy
+	}
 	first := int(b.vy) / lineH
 	off := int(b.vy) % lineH
 	b.scrollY = first
@@ -223,7 +233,11 @@ func (a *App) drawEditor(gtx layout.Context, b *Buffer) {
 		}
 	}
 
-	a.drawScrollbar(gtx, b, maxVy)
+	if minimap {
+		a.drawMinimap(gtx, b, maxVy)
+	} else {
+		a.drawScrollbar(gtx, b, maxVy)
+	}
 	a.scheduleHighlight(b, visible)
 
 	// keep auto-scrolling while dragging outside the text
@@ -336,12 +350,16 @@ func (a *App) drawScrollbar(gtx layout.Context, b *Buffer, maxVy float32) {
 	ty := float32(r.Min.Y) + b.vy/maxVy*(viewH-thumbH)
 
 	for {
-		ev, ok := gtx.Event(pointer.Filter{Target: &u.thumbTag, Kinds: pointer.Press | pointer.Drag | pointer.Release})
+		ev, ok := gtx.Event(pointer.Filter{Target: &u.thumbTag, Kinds: pointer.Press | pointer.Drag | pointer.Release | pointer.Enter | pointer.Leave})
 		if !ok {
 			break
 		}
 		e := ev.(pointer.Event)
 		switch e.Kind {
+		case pointer.Enter:
+			u.hoverThumb = true
+		case pointer.Leave:
+			u.hoverThumb = false
 		case pointer.Press:
 			u.dragThumb = true
 			if e.Position.Y >= ty && e.Position.Y <= ty+thumbH {
@@ -361,15 +379,15 @@ func (a *App) drawScrollbar(gtx layout.Context, b *Buffer, maxVy float32) {
 		}
 	}
 	th := a.th
-	alpha := uint8(0x38)
+	alpha := float32(0x38)
 	if u.dragThumb {
 		alpha = 0x70
 	}
 	u.thumb = image.Rect(track.Min.X+gtx.Dp(3), int(ty), track.Max.X-gtx.Dp(3), int(ty+thumbH))
-	rrect(ops, u.thumb, gtx.Dp(3), withA(th.fg, alpha))
-	// caret position marker
-	my := r.Min.Y + int(float32(b.cur.L*u.lineH)/contentH*viewH)
-	fill(ops, image.Rect(track.Min.X, my, track.Max.X, my+max(2, gtx.Dp(2))), withA(th.accent, 0xa0))
+	// hidden until you scroll or hover over it
+	if vis := a.scrollVisibility(gtx, u.hoverThumb || u.dragThumb); vis > 0 {
+		rrect(ops, u.thumb, gtx.Dp(3), withA(th.fg, uint8(alpha*vis)))
+	}
 	st := clip.Rect(track).Push(ops)
 	pointer.CursorDefault.Add(ops)
 	event.Op(ops, &u.thumbTag)

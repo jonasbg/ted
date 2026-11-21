@@ -70,8 +70,10 @@ func main() {
 		return
 	}
 
-	root, targets := resolveArgs(flag.Args())
-	fg := os.Getenv("TED_FOREGROUND") != ""
+	root, targets := resolveArgs(launchArgs(flag.Args()))
+	// Started from Finder, Spotlight or the Dock: macOS owns the process,
+	// so stay in the foreground instead of detaching.
+	fg := os.Getenv("TED_FOREGROUND") != "" || inAppBundle()
 	if !*wait && !*newWin && !fg && sendToRunning(root, targets) {
 		return
 	}
@@ -83,7 +85,26 @@ func main() {
 	w := new(app.Window)
 	opts := []app.Option{app.Title("ted"), app.Size(unit.Dp(1280), unit.Dp(820)), app.MinSize(unit.Dp(420), unit.Dp(300))}
 	w.Option(append(opts, windowOptions(*nativeTB)...)...)
-	a := newApp(w, root, newTheme(*theme), defaultFontSp)
+	// Theme: an explicit --theme or TED_THEME wins; on Omarchy follow the
+	// desktop theme and font; otherwise the built-in default.
+	explicit := os.Getenv("TED_THEME") != ""
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "theme" {
+			explicit = true
+		}
+	})
+	th := newTheme(*theme)
+	var om *omarchyTheme
+	if !explicit {
+		if om = loadOmarchyTheme(); om != nil {
+			if t := themeFromOmarchy(om); t != nil {
+				th = t
+			}
+			useOmarchyFont(omarchyFont())
+		}
+	}
+	a := newApp(w, root, th, defaultFontSp)
+	a.omarchy, a.themeFixed = om, explicit
 	a.noSession = *wait
 	a.nativeTitlebar = *nativeTB
 	if !a.noSession {
@@ -97,6 +118,8 @@ func main() {
 	}
 	if !*wait {
 		go a.listen()
+		os.MkdirAll(cacheDir(), 0o700)
+		os.WriteFile(lastRootFile(), []byte(root+"\n"), 0o600)
 	}
 	a.startTicker()
 	a.refreshGit()
@@ -135,6 +158,25 @@ func (a *App) loop() error {
 	}
 }
 
+// launchArgs drops arguments macOS adds when launching an app bundle.
+func launchArgs(args []string) []string {
+	out := args[:0:0]
+	for _, a := range args {
+		if !strings.HasPrefix(a, "-psn_") {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+func inAppBundle() bool {
+	exe, err := os.Executable()
+	return err == nil && strings.Contains(exe, ".app/Contents/MacOS/")
+}
+
+// lastRootFile remembers the most recent project, for launcher starts.
+func lastRootFile() string { return filepath.Join(cacheDir(), "last-root") }
+
 // resolveArgs turns command-line paths into a project root and files.
 func resolveArgs(args []string) (string, []target) {
 	cwd, _ := os.Getwd()
@@ -171,6 +213,21 @@ func resolveArgs(args []string) (string, []target) {
 			} else if !strings.HasPrefix(f, cwd+string(filepath.Separator)) {
 				root = dir
 			}
+		}
+	}
+	// Opened from an app launcher (no paths, started in / or ~): reopen the
+	// last project rather than showing the whole home folder.
+	home, _ := os.UserHomeDir()
+	if len(args) == 0 && (cwd == "/" || cwd == home || cwd == "") {
+		if b, err := os.ReadFile(lastRootFile()); err == nil {
+			if p := strings.TrimSpace(string(b)); p != "" {
+				if st, err := os.Stat(p); err == nil && st.IsDir() {
+					root = p
+				}
+			}
+		}
+		if root == "/" || root == "" {
+			root = home
 		}
 	}
 	if r, err := filepath.EvalSymlinks(root); err == nil {

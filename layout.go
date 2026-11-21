@@ -46,6 +46,7 @@ type uiState struct {
 	dragPos      f32.Point
 	dragSplit    bool
 	dragThumb    bool
+	hoverThumb   bool
 	dragThumbOff float32
 
 	caret image.Rectangle
@@ -106,6 +107,9 @@ func (a *App) layout(gtx layout.Context) {
 	u.sidebar = image.Rect(actW, titleH, actW+sw, H-statusH)
 	u.status = image.Rect(0, H-statusH, W, H)
 	ex := actW + sw
+	if a.showSidebar {
+		ex += gtx.Dp(panelGapDp) // breathing room instead of a divider line
+	}
 	u.tabs = image.Rect(ex, titleH, W, titleH+tabsH)
 	u.editor = image.Rect(ex, titleH+tabsH, W, H-statusH)
 
@@ -552,11 +556,11 @@ func (a *App) drawSidebar(gtx layout.Context) {
 		row := image.Rect(r.Min.X, y, r.Max.X, y+rowH)
 		switch {
 		case i == t.sel && a.focus == focusTree:
-			fill(ops, row, th.sideSel)
+			rowBg(gtx, row, th.sideSel)
 		case n.path == active:
-			fill(ops, row, mixC(th.sidebar, th.fg, 0.07))
+			rowBg(gtx, row, mixC(th.sidebar, th.fg, 0.07))
 		case i == u.hoverRow:
-			fill(ops, row, th.hover)
+			rowBg(gtx, row, th.hover)
 		}
 		indent := gtx.Dp(12) + (n.depth-1)*gtx.Dp(14)
 		cx := r.Min.X + indent + gtx.Dp(4)
@@ -608,7 +612,7 @@ func (a *App) drawSidebar(gtx layout.Context) {
 	st.Pop()
 
 	// splitter
-	split := image.Rect(r.Max.X-gtx.Dp(3), r.Min.Y, r.Max.X+gtx.Dp(3), r.Max.Y)
+	split := image.Rect(r.Max.X, r.Min.Y, r.Max.X+gtx.Dp(panelGapDp), r.Max.Y)
 	for {
 		ev, ok := gtx.Event(pointer.Filter{Target: &u.splitTag, Kinds: pointer.Press | pointer.Drag | pointer.Release | pointer.Enter | pointer.Leave})
 		if !ok {
@@ -630,11 +634,12 @@ func (a *App) drawSidebar(gtx layout.Context) {
 			u.dragSplit = false
 		}
 	}
-	lineCol := th.border
+	// No divider: spacing separates the panel from the editor. A faint
+	// line appears only while the resize handle is hovered or dragged.
 	if u.hoverSplit || u.dragSplit {
-		lineCol = th.accent
+		gx := r.Max.X + gtx.Dp(panelGapDp)/2
+		fill(ops, image.Rect(gx-1, r.Min.Y+gtx.Dp(8), gx+1, r.Max.Y-gtx.Dp(8)), withA(th.accent, 0x90))
 	}
-	fill(ops, image.Rect(r.Max.X-1, r.Min.Y, r.Max.X, r.Max.Y), lineCol)
 	ss := clip.Rect(split).Push(ops)
 	pointer.CursorColResize.Add(ops)
 	event.Op(ops, &u.splitTag)
@@ -642,6 +647,15 @@ func (a *App) drawSidebar(gtx layout.Context) {
 }
 
 var _ = color.NRGBA{}
+
+// panelGapDp is the space between the side panel and the editor.
+const panelGapDp = 10
+
+// rowBg draws a list row highlight as a slightly inset rounded rectangle.
+func rowBg(gtx layout.Context, row image.Rectangle, c color.NRGBA) {
+	r := image.Rect(row.Min.X+gtx.Dp(6), row.Min.Y+gtx.Dp(1), row.Max.X-gtx.Dp(4), row.Max.Y-gtx.Dp(1))
+	rrect(gtx.Ops, r, gtx.Dp(5), c)
+}
 
 // isDoubleClick reports whether this press on (what, idx) follows a press on
 // the same target closely enough to count as a double click.

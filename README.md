@@ -49,14 +49,30 @@ there instead of starting another window.
 
 Press **F1** for all shortcuts.
 
+## Omarchy
+
+On [Omarchy](https://omarchy.org), ted follows the desktop. It reads the
+current theme's `colors.toml`, so the editor matches your terminal, bar and
+launcher (Tokyo Night out of the box). It switches live when you change
+theme. It also uses the font set with `omarchy-font-set`, and opens without
+a title bar under Hyprland. `make install` adds a desktop entry, so ted shows
+up in Walker. Copy and paste use Ctrl+C/V; Omarchy's universal Super+C/V
+send Ctrl/Shift+Insert, which Gio does not support yet. Super+X (Shift+Delete)
+cuts.
+
 ## Install
 
 Requires Go 1.27 or newer and a C compiler (cgo).
 
 ```
-make install                  # installs ~/.local/bin/ted
+make install                  # ~/.local/bin/ted, plus ted.app (macOS) or a desktop entry (Linux)
 make install PREFIX=/usr/local
 ```
+
+On macOS, `ted.app` goes into `~/Applications`, so ted is in Spotlight,
+Launchpad and Raycast. On Linux, the desktop entry and icon make it show up
+in your app launcher. Started from a launcher without a file, ted reopens
+your last project.
 
 Linux also needs the Wayland/X11 development packages. On Debian or Ubuntu:
 
@@ -71,7 +87,8 @@ Optional: `ripgrep` for faster, .gitignore-aware search.
 ## Options
 
 ```
---theme NAME        colour theme (or TED_THEME); --themes lists them
+--theme NAME        colour theme (or TED_THEME); --themes lists them.
+                    Without it, ted follows Omarchy's theme when present.
 --native-titlebar   keep the standard macOS title bar
 -w, --wait          block until the window closes
 -n, --new           always open a new window
