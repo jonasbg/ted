@@ -1,0 +1,91 @@
+name: Build and distribute Ted
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  arch:
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - run: pacman -Syu --needed --noconfirm git go libglvnd libx11 libxcursor libxfixes libxkbcommon-x11 wayland
+      - uses: actions/checkout@v4
+      - name: Build and test the Arch package
+        run: |
+          useradd -m builder
+          chown -R builder "$GITHUB_WORKSPACE"
+          su builder -c "cd '$GITHUB_WORKSPACE' && packaging/arch/build /tmp/packages"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: arch
+          path: /tmp/packages/*.pkg.tar.zst
+  clients:
+    strategy:
+      matrix:
+        os: [ubuntu-22.04, macos-15, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1-mesa-dev libgles2-mesa-dev libx11-xcb-dev libxcursor-dev libwayland-dev libxkbcommon-x11-dev
+      - name: Test and package native client
+        env:
+          GOFLAGS: -tags=novulkan
+        run: |
+          go test ./...
+          if [[ "$RUNNER_OS" = macOS ]]; then
+            make app
+            tar -C build -czf "ted-Darwin-$(uname -m).tar.gz" ted.app
+          else
+            make build
+            go run ./tools/mkicon -out build -name ted.png -sizes 256
+            tar -czf "ted-Linux-$(uname -m).tar.gz" ted -C build ted.png
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: client-${{ matrix.os }}
+          path: ted-*.tar.gz
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [arch, clients]
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    concurrency: ted-distribution
+    steps:
+      - run: pacman -Syu --needed --noconfirm git openssh gnupg python
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/artifacts
+      - uses: actions/checkout@v4
+        with:
+          repository: jonasbg/omarchy
+          ssh-key: ${{ secrets.OMARCHY_DEPLOY_KEY }}
+          path: dist
+      - name: Publish signed packages and formula
+        env:
+          PACKAGE_SIGNING_KEY: ${{ secrets.PACKAGE_SIGNING_KEY }}
+        run: |
+          set -eu
+          version=${GITHUB_REF_NAME#v}
+          grep -Fx "var version = \"$version\"" main.go
+          printf '%s' "$PACKAGE_SIGNING_KEY" | gpg --batch --import
+          packaging/arch/publish dist /tmp/artifacts/arch/*.pkg.tar.zst
+          mkdir -p "dist/clients/$version" dist/Formula
+          cp /tmp/artifacts/client-*/*.tar.gz "dist/clients/$version/"
+          python packaging/brew-formula.py dist "$version" > dist/Formula/ted.rb
+          cp packaging/distribution.md dist/README.md
+          cp packaging/arch/enable-repo dist/enable-repo
+          git -C dist config user.name 'Ted release CI'
+          git -C dist config user.email 'actions@users.noreply.github.com'
+          git -C dist add .
+          git -C dist diff --cached --quiet || git -C dist commit -m "Release Ted $version"
+          git -C dist push origin HEAD:main

@@ -18,7 +18,7 @@ import (
 	"gioui.org/unit"
 )
 
-var version = "0.2.0"
+var version = "0.2.1"
 
 const defaultFontSp = 14
 
@@ -59,7 +59,8 @@ func main() {
 	nativeTB := flag.Bool("native-titlebar", false, "keep the standard macOS title bar")
 	newWin := flag.Bool("new", false, "open a new window")
 	flag.BoolVar(newWin, "n", false, "open a new window")
-	flag.Parse()
+	launcher := flag.Bool("launcher", false, "restore the last project on a desktop launch")
+	flag.CommandLine.Parse(launchArgs(os.Args[1:]))
 
 	if *showVersion {
 		fmt.Println("ted", version)
@@ -70,7 +71,7 @@ func main() {
 		return
 	}
 
-	root, targets := resolveArgs(launchArgs(flag.Args()))
+	root, targets := resolveArgs(flag.Args(), *launcher || inAppBundle())
 	// Started from Finder, Spotlight or the Dock: macOS owns the process,
 	// so stay in the foreground instead of detaching.
 	fg := os.Getenv("TED_FOREGROUND") != "" || inAppBundle()
@@ -178,7 +179,7 @@ func inAppBundle() bool {
 func lastRootFile() string { return filepath.Join(cacheDir(), "last-root") }
 
 // resolveArgs turns command-line paths into a project root and files.
-func resolveArgs(args []string) (string, []target) {
+func resolveArgs(args []string, launcher bool) (string, []target) {
 	cwd, _ := os.Getwd()
 	var files []target
 	root := ""
@@ -218,7 +219,7 @@ func resolveArgs(args []string) (string, []target) {
 	// Opened from an app launcher (no paths, started in / or ~): reopen the
 	// last project rather than showing the whole home folder.
 	home, _ := os.UserHomeDir()
-	if len(args) == 0 && (cwd == "/" || cwd == home || cwd == "") {
+	if launcher && len(args) == 0 {
 		if b, err := os.ReadFile(lastRootFile()); err == nil {
 			if p := strings.TrimSpace(string(b)); p != "" {
 				if st, err := os.Stat(p); err == nil && st.IsDir() {

@@ -1,0 +1,32 @@
+pkgname=ted
+pkgver=0.2.1
+pkgrel=1
+pkgdesc="Native code editor for the terminal and desktop"
+arch=(x86_64)
+url="https://github.com/jonasbg/omarchy"
+depends=(glibc libglvnd libx11 libxcursor libxfixes libxkbcommon-x11 wayland)
+makedepends=(go pkgconf)
+options=(!debug)
+source=("ted-$pkgver.tar.gz")
+# The release builder creates the archive directly from the checkout.
+sha256sums=('SKIP')
+
+build() {
+  cd "ted-$pkgver"
+  export GOFLAGS="-buildvcs=false -tags=novulkan"
+  make build
+  go run ./tools/mkicon -out . -sizes 256 -name ted.png
+  sed 's|@BIN@|/usr/bin/ted|' packaging/ted.desktop > ted.desktop
+}
+
+check() {
+  cd "ted-$pkgver"
+  go test -buildvcs=false -tags novulkan ./...
+}
+
+package() {
+  cd "ted-$pkgver"
+  install -Dm755 ted "$pkgdir/usr/bin/ted"
+  install -Dm644 ted.png "$pkgdir/usr/share/icons/hicolor/256x256/apps/ted.png"
+  install -Dm644 ted.desktop "$pkgdir/usr/share/applications/ted.desktop"
+}

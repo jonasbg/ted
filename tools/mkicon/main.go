@@ -1,5 +1,4 @@
-// mkicon renders ted's app icon as PNG files: a dark rounded tile with
-// three lines of "code" and the orange underline used for the active tab.
+// mkicon renders the golden Ted monogram at desktop and launcher sizes.
 //
 //	go run ./tools/mkicon -out dir -sizes 16,32,...
 package main
@@ -39,18 +38,14 @@ func hex(s string) color.NRGBA {
 
 // shapes on a 1024-unit canvas (macOS icon grid: tile inset ~10%)
 func shapes() []rrect {
-	tile := rrect{100, 100, 924, 924, 185, hex("#1a1b26")}
-	bar := func(x, y, w float64, c string) rrect { return rrect{x, y, x + w, y + 56, 28, hex(c)} }
+	ink := hex("#332813")
 	return []rrect{
-		tile,
-		bar(230, 300, 250, "#bb9af7"),           // keyword
-		bar(510, 300, 290, "#7aa2f7"),           // function
-		bar(310, 430, 200, "#9ece6a"),           // string
-		bar(540, 430, 170, "#7dcfff"),           // operator
-		bar(310, 560, 330, "#c0caf5"),           // text
-		bar(230, 690, 120, "#bb9af7"),           // closing brace
-		{230, 790, 560, 808, 9, hex("#ff9e64")}, // the active-tab underline
+		{64, 64, 960, 960, 206, hex("#f5c347")},
+		{230, 310, 608, 408, 23, ink},
+		{345, 365, 446, 710, 25, ink},
+		{510, 602, 772, 699, 20, ink},
 	}
+
 }
 
 func render(size int) *image.NRGBA {
@@ -100,7 +95,11 @@ func main() {
 		if err != nil {
 			continue
 		}
-		f, err := os.Create(filepath.Join(*out, fmt.Sprintf(*name, n)))
+		filename := *name
+		if strings.Contains(filename, "%d") {
+			filename = fmt.Sprintf(filename, n)
+		}
+		f, err := os.Create(filepath.Join(*out, filename))
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)

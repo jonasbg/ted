@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Run as root on the Omarchy machine.
+set -euo pipefail
+base=https://raw.githubusercontent.com/jonasbg/omarchy/main
+fingerprint=E2CB1637382565A4AE7036CD7DD6EEBFD31989BD
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+curl --fail --silent --show-error --location "$base/packages.asc" -o "$tmp/key"
+actual=$(gpg --show-keys --with-colons "$tmp/key" | awk -F: '$1=="fpr"{print $10;exit}')
+[[ "$actual" == "$fingerprint" ]]
+pacman-key --add "$tmp/key"
+pacman-key --lsign-key "$fingerprint"
+repo=/etc/pacman.d/jonasbg.conf
+cat > "$repo" <<'CONF'
+[jonasbg]
+SigLevel = PackageRequired DatabaseRequired
+Server = https://raw.githubusercontent.com/jonasbg/omarchy/main/$arch
+CONF
+grep -Fxq "Include = $repo" /etc/pacman.conf || printf '\nInclude = %s\n' "$repo" >> /etc/pacman.conf
+# Refresh only our new database, preserving the other local sync databases.
+printf '[options]\nArchitecture = auto\nInclude = %s\n' "$repo" > "$tmp/sync.conf"
+pacman --config "$tmp/sync.conf" -Sy
+pacman -S --needed --noconfirm jonasbg/ted

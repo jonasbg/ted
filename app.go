@@ -443,7 +443,7 @@ func (a *App) scheduleHighlight(b *Buffer, visibleLines int) {
 	h.running = true
 	ver, lexer, th := b.version, h.lexer, a.th
 	go func() {
-		a.post(hlResult{b, ver, from, windowed, computeSpans(lexer, th, text)})
+		a.post(hlResult{th, b, ver, from, windowed, computeSpans(lexer, th, text)})
 	}()
 }
 
@@ -523,6 +523,9 @@ func (a *App) drainPending() {
 		case hlResult:
 			h := d.buf.hl
 			h.running = false
+			if d.theme != a.th {
+				continue
+			}
 			h.spans = d.spans
 			h.from = d.from
 			h.windowed = d.windowed

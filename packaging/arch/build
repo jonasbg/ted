@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+out=$(realpath -m "${1:?pass an output directory}")
+mkdir -p "$out"
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+version=$(sed -n 's/^var version = "\(.*\)"/\1/p' main.go)
+cp packaging/arch/PKGBUILD "$tmp/"
+grep -Fx "pkgver=$version" "$tmp/PKGBUILD"
+git ls-files -z --cached --others --exclude-standard | tar --null -T - --transform="s|^|ted-$version/|" -czf "$tmp/ted-$version.tar.gz"
+(cd "$tmp" && PKGDEST="$out" makepkg --noconfirm)

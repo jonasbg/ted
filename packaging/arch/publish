@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Stage a signed package and database in a distribution repository checkout.
+set -euo pipefail
+dist=$(realpath "${1:?distribution checkout}")
+pkg=$(realpath "${2:?package file}")
+repo="$dist/x86_64"
+mkdir -p "$repo"
+name=$(basename "$pkg")
+if [[ -f "$repo/$name.sig" && -f "$repo/jonasbg.db.sig" ]] && git -C "$dist" ls-files --error-unmatch "x86_64/$name" >/dev/null 2>&1; then
+  echo "$name was already published"
+  exit 0
+fi
+install -m644 "$pkg" "$repo/$name"
+gpg --batch --detach-sign "$repo/$name"
+(cd "$repo" && repo-add -s jonasbg.db.tar.gz "$name")
+# GitHub raw URLs serve symlink contents. pacman needs real files.
+for suffix in db files; do
+  for ext in '' .sig; do
+    cp --remove-destination "$repo/jonasbg.$suffix.tar.gz$ext" "$repo/jonasbg.$suffix$ext"
+  done
+done
+rm -f "$repo"/*.old "$repo"/*.old.sig
+gpg --armor --export 'jonasbg Omarchy package signing' > "$dist/packages.asc"

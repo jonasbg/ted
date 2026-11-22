@@ -121,13 +121,16 @@ func TestLauncherStartReopensLastProject(t *testing.T) {
 	os.MkdirAll(cacheDir(), 0o700)
 	os.WriteFile(lastRootFile(), []byte(proj+"\n"), 0o600)
 	t.Chdir(home) // launchers start apps in the home folder
-	root, files := resolveArgs(launchArgs([]string{"-psn_0_12345"}))
+	if root, _ := resolveArgs(nil, false); root != home {
+		t.Fatalf("terminal opened %q, want home", root)
+	}
+	root, files := resolveArgs(nil, true)
 	if root != proj || len(files) != 0 {
 		t.Fatalf("root=%q files=%v, want last project %q", root, files, proj)
 	}
 	// with no remembered project, fall back to home rather than /
 	os.Remove(lastRootFile())
-	if root, _ := resolveArgs(nil); root != home {
+	if root, _ := resolveArgs(nil, true); root != home {
 		t.Fatalf("root=%q, want home", root)
 	}
 }

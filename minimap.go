@@ -66,7 +66,7 @@ func (a *App) drawMinimap(gtx layout.Context, b *Buffer, maxVy float32) {
 		mmTop = b.vy / maxVy * (contentH - viewH)
 	}
 	k := float32(lh) / float32(u.lineH) // minimap px per editor px
-	sliderTop := func() float32 { return b.vy*k - mmTop }
+
 	sliderH := float32(u.editor.Dy()) * k
 	// vy for a given slider top: sliderTop is linear in vy, sliderTop = vy*slope
 	slope := k
@@ -74,6 +74,7 @@ func (a *App) drawMinimap(gtx layout.Context, b *Buffer, maxVy float32) {
 		slope = k - (contentH-viewH)/maxVy
 	}
 
+	sliderTop := func() float32 { return b.vy * slope }
 	for {
 		ev, ok := gtx.Event(pointer.Filter{Target: &m.tag, Kinds: pointer.Press | pointer.Drag | pointer.Release | pointer.Enter | pointer.Leave | pointer.Scroll,
 			ScrollY: pointer.ScrollRange{Min: -1 << 20, Max: 1 << 20}})

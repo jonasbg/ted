@@ -41,6 +41,7 @@ type highlightState struct {
 }
 
 type hlResult struct {
+	theme    *Theme
 	buf      *Buffer
 	version  int
 	from     int
