@@ -18,7 +18,7 @@ import (
 	"gioui.org/unit"
 )
 
-var version = "0.2.1"
+var version = "0.2.2"
 
 const defaultFontSp = 14
 
@@ -28,9 +28,9 @@ func usage() {
 Usage:
   ted [flags] [path[:line[:col]] ...]
 
-  ted                 open the current folder
+  ted                 restore unsaved tabs or show the welcome screen
   ted src/            open a folder
-  ted main.go         open a file (the tree shows its git project)
+  ted main.go         open a file without a folder tree
   ted main.go:42      jump to a line
   ted a.go b.go       open several files
 
@@ -59,7 +59,7 @@ func main() {
 	nativeTB := flag.Bool("native-titlebar", false, "keep the standard macOS title bar")
 	newWin := flag.Bool("new", false, "open a new window")
 	flag.BoolVar(newWin, "n", false, "open a new window")
-	launcher := flag.Bool("launcher", false, "restore the last project on a desktop launch")
+	flag.Bool("launcher", false, "desktop launcher invocation")
 	flag.CommandLine.Parse(launchArgs(os.Args[1:]))
 
 	if *showVersion {
@@ -71,7 +71,7 @@ func main() {
 		return
 	}
 
-	root, targets := resolveArgs(flag.Args(), *launcher || inAppBundle())
+	root, targets := resolveArgs(flag.Args())
 	// Started from Finder, Spotlight or the Dock: macOS owns the process,
 	// so stay in the foreground instead of detaching.
 	fg := os.Getenv("TED_FOREGROUND") != "" || inAppBundle()
@@ -109,18 +109,23 @@ func main() {
 	a.noSession = *wait
 	a.nativeTitlebar = *nativeTB
 	if !a.noSession {
-		a.restoreSession()
+		a.restoreSession(root, root == "")
+		if root == "" && len(targets) == 0 && len(a.bufs) == 0 {
+			if last, err := os.ReadFile(lastRootFile()); err == nil {
+				if prior := strings.TrimSuffix(string(last), "\n"); prior != "" {
+					a.restoreSession(prior, true)
+				}
+			}
+		}
 	}
 	for _, t := range targets {
 		a.openFile(t.path, t.line, t.col)
 	}
-	if len(a.bufs) == 0 {
+	if len(a.bufs) == 0 && root != "" {
 		a.focus = focusTree
 	}
 	if !*wait {
 		go a.listen()
-		os.MkdirAll(cacheDir(), 0o700)
-		os.WriteFile(lastRootFile(), []byte(root+"\n"), 0o600)
 	}
 	a.startTicker()
 	a.refreshGit()
@@ -175,12 +180,11 @@ func inAppBundle() bool {
 	return err == nil && strings.Contains(exe, ".app/Contents/MacOS/")
 }
 
-// lastRootFile remembers the most recent project, for launcher starts.
+// lastRootFile identifies the most recently saved session for draft recovery.
 func lastRootFile() string { return filepath.Join(cacheDir(), "last-root") }
 
 // resolveArgs turns command-line paths into a project root and files.
-func resolveArgs(args []string, launcher bool) (string, []target) {
-	cwd, _ := os.Getwd()
+func resolveArgs(args []string) (string, []target) {
 	var files []target
 	root := ""
 	for _, arg := range args {
@@ -202,37 +206,10 @@ func resolveArgs(args []string, launcher bool) (string, []target) {
 		}
 		files = append(files, target{abs, line, col})
 	}
-	if root == "" {
-		root = cwd
-		if len(files) > 0 {
-			// Use the file's project: its git repo, else its folder (unless
-			// it already lives under the current directory).
-			f := files[0].path
-			dir := filepath.Dir(f)
-			if top := gitToplevel(dir); top != "" {
-				root = top
-			} else if !strings.HasPrefix(f, cwd+string(filepath.Separator)) {
-				root = dir
-			}
+	if root != "" {
+		if r, err := filepath.EvalSymlinks(root); err == nil {
+			root = r
 		}
-	}
-	// Opened from an app launcher (no paths, started in / or ~): reopen the
-	// last project rather than showing the whole home folder.
-	home, _ := os.UserHomeDir()
-	if launcher && len(args) == 0 {
-		if b, err := os.ReadFile(lastRootFile()); err == nil {
-			if p := strings.TrimSpace(string(b)); p != "" {
-				if st, err := os.Stat(p); err == nil && st.IsDir() {
-					root = p
-				}
-			}
-		}
-		if root == "/" || root == "" {
-			root = home
-		}
-	}
-	if r, err := filepath.EvalSymlinks(root); err == nil {
-		root = r
 	}
 	return root, files
 }

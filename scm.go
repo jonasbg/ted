@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"image"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"gioui.org/io/event"
@@ -20,6 +21,7 @@ const (
 	sideFiles = iota
 	sideChanges
 	sideHistory
+	activitySettings
 )
 
 type scmRow struct {
@@ -47,7 +49,7 @@ type scmState struct {
 	histFollow bool
 
 	hover    int
-	tabRects [3]image.Rectangle
+	tabRects [4]image.Rectangle
 	tabHover int
 	tag      int
 	tabsTag  int
@@ -103,6 +105,10 @@ func (a *App) applyGit(g gitSnapshot) {
 
 func (a *App) showSideView(v int) {
 	a.closeOverlay()
+	if a.root == "" {
+		a.setMsg("Open a folder with ted <folder> to browse the project")
+		return
+	}
 	a.sideView = v
 	a.showSidebar = true
 	a.focus = focusTree
@@ -215,6 +221,10 @@ func (a *App) drawActivityBar(gtx layout.Context) {
 			s.tabHover = -1
 		}
 		if e.Kind == pointer.Press && s.tabHover >= 0 {
+			if s.tabHover == activitySettings {
+				a.openSettings()
+				continue
+			}
 			if a.showSidebar && a.sideView == s.tabHover {
 				// clicking the active view's icon hides the panel, as in VS Code
 				a.showSidebar = false
@@ -231,8 +241,14 @@ func (a *App) drawActivityBar(gtx layout.Context) {
 	st.Pop()
 
 	size := gtx.Dp(48)
-	for i := 0; i < 3; i++ {
+	for i := range s.tabRects {
+		if i == activitySettings && runtime.GOOS != "linux" {
+			continue
+		}
 		tr := image.Rect(r.Min.X, r.Min.Y+gtx.Dp(4)+i*size, r.Max.X, r.Min.Y+gtx.Dp(4)+(i+1)*size)
+		if i == activitySettings {
+			tr = image.Rect(r.Min.X, r.Max.Y-size, r.Max.X, r.Max.Y)
+		}
 		s.tabRects[i] = tr
 		active := a.showSidebar && a.sideView == i
 		col := mixC(th.activityBg, th.fg, 0.45)
@@ -245,6 +261,13 @@ func (a *App) drawActivityBar(gtx layout.Context) {
 		cx, cy := (tr.Min.X+tr.Max.X)/2, (tr.Min.Y+tr.Max.Y)/2
 		unit := float32(gtx.Dp(1))
 		switch i {
+		case activitySettings:
+			for j, pos := range []int{-4, 4, -2} {
+				y := cy + (j-1)*gtx.Dp(6)
+				x := cx + pos*gtx.Dp(1)
+				fill(ops, image.Rect(cx-gtx.Dp(10), y, cx+gtx.Dp(10), y+gtx.Dp(1)), col)
+				rrect(ops, image.Rect(x-gtx.Dp(2), y-gtx.Dp(2), x+gtx.Dp(2), y+gtx.Dp(3)), gtx.Dp(1), col)
+			}
 		case sideFiles:
 			iconFiles(ops, cx, cy, unit, col)
 		case sideChanges:

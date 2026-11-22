@@ -294,7 +294,7 @@ func (a *App) drawTabs(gtx layout.Context) {
 		case i == u.hoverTab:
 			rrect(ops, cr, gtx.Dp(4), mixC(th.bg, th.fg, 0.1))
 			cross(ops, cx, cy, gtx.Dp(7), float32(gtx.Dp(1.4)), th.fg)
-		case b.dirty() || (b.path == "" && b.virtualKey == ""):
+		case b.dirty():
 			dot(ops, cx, cy, gtx.Dp(4), th.fg)
 		case active:
 			cross(ops, cx, cy, gtx.Dp(7), float32(gtx.Dp(1.4)), th.dim)

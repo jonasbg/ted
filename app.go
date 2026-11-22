@@ -87,7 +87,8 @@ type App struct {
 	noSession bool
 	socket    string
 
-	mm minimapState
+	settingDefaults bool
+	mm              minimapState
 
 	omarchy    *omarchyTheme // set when following the Omarchy desktop theme
 	themeFixed bool          // --theme or TED_THEME was given
@@ -107,10 +108,12 @@ type App struct {
 }
 
 func newApp(w *app.Window, root string, th *Theme, fontSp float32) *App {
-	a := &App{w: w, th: th, root: root, showSidebar: true, sidebarDp: 250, fontSp: fontSp, follow: true}
+	a := &App{w: w, th: th, root: root, showSidebar: root != "", sidebarDp: 250, fontSp: fontSp, follow: true}
 	a.tc = newTextCache()
 	a.tree = newTree(root)
-	a.tree.gitRoot = gitToplevel(root)
+	if root != "" {
+		a.tree.gitRoot = gitToplevel(root)
+	}
 	a.blinkStart = time.Now()
 	a.ui.hoverTab, a.ui.hoverRow = -1, -1
 	a.scm.hover, a.scm.tabHover = -1, -1
@@ -165,6 +168,9 @@ func (a *App) abs(p string) string {
 	}
 	if !filepath.IsAbs(p) {
 		p = filepath.Join(a.root, p)
+		if abs, err := filepath.Abs(p); err == nil {
+			p = abs
+		}
 	}
 	return filepath.Clean(p)
 }
@@ -289,9 +295,12 @@ func (a *App) closeBuffer(i int) {
 		a.active--
 	}
 	if len(a.bufs) == 0 {
-		a.focus = focusTree
+		if a.root != "" {
+			a.focus = focusTree
+		}
 		a.find = nil
 	}
+	a.saveSessionIfChanged()
 }
 
 func (a *App) requestClose(i int) {
@@ -448,7 +457,7 @@ func (a *App) scheduleHighlight(b *Buffer, visibleLines int) {
 }
 
 func (a *App) loadFiles() {
-	if a.filesLoading {
+	if a.root == "" || a.filesLoading {
 		return
 	}
 	a.filesLoading = true
@@ -555,6 +564,13 @@ func (a *App) drainPending() {
 			if a.w != nil {
 				a.w.Perform(system.ActionRaise)
 			}
+		case defaultsResult:
+			a.settingDefaults = false
+			if d.err != nil {
+				a.setErr("%v", d.err)
+			} else {
+				a.setMsg("Ted is the default editor for text and code files")
+			}
 		case tickEvent:
 			a.tickN++
 			a.checkDisk()
@@ -572,6 +588,9 @@ func (a *App) drainPending() {
 
 func (a *App) updateTitle() {
 	t := filepath.Base(a.root)
+	if a.root == "" {
+		t = "ted"
+	}
 	if b := a.buf(); b != nil {
 		d := ""
 		if b.dirty() {

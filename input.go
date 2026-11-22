@@ -65,6 +65,11 @@ func (a *App) onKey(gtx layout.Context, e key.Event) {
 	// Global shortcuts.
 	if sc {
 		switch e.Name {
+		case ",":
+			if runtime.GOOS == "linux" {
+				a.openSettings()
+				return
+			}
 		case "P":
 			if !shift {
 				a.openQuick()
@@ -108,6 +113,9 @@ func (a *App) onKey(gtx layout.Context, e key.Event) {
 			})
 			return
 		case "B":
+			if a.root == "" {
+				return
+			}
 			a.showSidebar = !a.showSidebar
 			if !a.showSidebar && a.focus == focusTree {
 				a.focus = focusEditor

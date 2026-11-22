@@ -1,14 +1,15 @@
 # ted
 
 A fast, native code editor you open from the terminal. `ted path` opens a
-window with the file and its project tree, then returns your prompt
+window with the requested file or folder, then returns your prompt
 immediately. It's one Go binary with GPU rendering through Gio. There is no
 Electron, no webview and no extension host.
 
 ```
-ted                 # current folder
+ted                 # restore unsaved tabs, or show the welcome screen
+ted .               # current folder
 ted src/            # a folder
-ted main.go         # a file; the tree shows its git project
+ted main.go         # a file without a folder tree
 ted main.go:42      # jump to a line (paste file:line straight from tool output)
 ted a.go b.go       # several files as tabs
 git config core.editor "ted -w"   # block until the window closes
@@ -47,6 +48,9 @@ there instead of starting another window.
   float over a top bar that uses the theme's background colour. Drag the
   window by empty space in that bar.
 
+On Linux, click the sliders at the bottom of the sidebar or press **Ctrl+,**
+to open Settings. Choose **Make default** to open text and code files in Ted.
+
 Press **F1** for all shortcuts.
 
 ## Omarchy
@@ -74,8 +78,7 @@ make install PREFIX=/usr/local
 
 On macOS, `ted.app` goes into `~/Applications`, so ted is in Spotlight,
 Launchpad and Raycast. On Linux, the desktop entry and icon make it show up
-in your app launcher. Started from a launcher without a file, ted reopens
-your last project.
+in your app launcher. Started from a launcher without a file, ted restores unsaved work without opening a folder.
 
 Linux also needs the Wayland/X11 development packages. On Debian or Ubuntu:
 

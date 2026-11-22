@@ -34,7 +34,9 @@ var alwaysHidden = map[string]bool{".git": true, ".DS_Store": true, ".hg": true,
 
 func newTree(root string) *Tree {
 	t := &Tree{root: &node{name: filepath.Base(root), path: root, isDir: true, expanded: true}}
-	t.load(t.root)
+	if root != "" {
+		t.load(t.root)
+	}
 	t.flatten()
 	return t
 }
@@ -181,6 +183,9 @@ func (t *Tree) refresh() {
 
 // reveal expands parents of path and selects it.
 func (t *Tree) reveal(path string) bool {
+	if t.root.path == "" {
+		return false
+	}
 	rel, err := filepath.Rel(t.root.path, path)
 	if err != nil || strings.HasPrefix(rel, "..") {
 		return false

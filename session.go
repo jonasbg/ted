@@ -96,12 +96,14 @@ func (a *App) saveSession() {
 	os.MkdirAll(filepath.Dir(p), 0o700)
 	tmp := p + ".tmp"
 	if err := os.WriteFile(tmp, data, 0o600); err == nil {
-		os.Rename(tmp, p)
+		if os.Rename(tmp, p) == nil {
+			os.WriteFile(lastRootFile(), []byte(a.root+"\n"), 0o600)
+		}
 	}
 }
 
-func (a *App) restoreSession() {
-	data, err := os.ReadFile(sessionPath(a.root))
+func (a *App) restoreSession(root string, unsavedOnly bool) {
+	data, err := os.ReadFile(sessionPath(root))
 	if err != nil {
 		return
 	}
@@ -115,9 +117,13 @@ func (a *App) restoreSession() {
 	if s.Font > 0 {
 		a.fontSp = s.Font
 	}
-	a.showSidebar = s.Sidebar || len(s.Tabs) == 0
+	a.showSidebar = a.root != "" && (s.Sidebar || len(s.Tabs) == 0)
 	restored := 0
-	for _, t := range s.Tabs {
+	active := -1
+	for i, t := range s.Tabs {
+		if unsavedOnly && t.Unsaved == nil {
+			continue
+		}
 		var b *Buffer
 		if t.Path == "" {
 			if t.Unsaved == nil {
@@ -142,12 +148,15 @@ func (a *App) restoreSession() {
 			}
 			restored++
 		}
+		if i == s.Active {
+			active = a.active
+		}
 		b.cur = b.clamp(Pos{t.Line - 1, t.Col - 1})
 		b.selecting = false
 		b.vy = t.Vy
 	}
-	if s.Active >= 0 && s.Active < len(a.bufs) {
-		a.active = s.Active
+	if active >= 0 {
+		a.active = active
 	}
 	a.msg = ""
 	if restored > 0 {
