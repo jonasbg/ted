@@ -13,7 +13,7 @@ jobs:
         os: [ubuntu-24.04, macos-15, macos-15-intel]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: Homebrew/actions/setup-homebrew@master
+      - uses: Homebrew/actions/setup-homebrew@61b401267256bb9c047d6d1481b176d5772a0ba7
       - run: |
           brew tap jonasbg/omarchy https://github.com/jonasbg/omarchy
           brew install jonasbg/omarchy/ted
