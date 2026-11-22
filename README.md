@@ -61,6 +61,9 @@ send Ctrl/Shift+Insert, which Gio does not support yet. Super+X (Shift+Delete)
 cuts.
 
 ## Install
+Signed Omarchy packages and Homebrew builds for macOS and Linux are available
+in the [jonasbg distribution repository](https://github.com/jonasbg/omarchy).
+
 
 Requires Go 1.27 or newer and a C compiler (cgo).
 

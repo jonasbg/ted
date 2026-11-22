@@ -26,7 +26,8 @@ print('''  on_linux do
     depends_on arch: :x86_64
     depends_on "libxcursor"
     depends_on "libxkbcommon"
-    depends_on "libglvnd"
+    depends_on "mesa"
+    depends_on "patchelf" => :build
     depends_on "wayland"
   end
 
@@ -43,6 +44,7 @@ print('''  on_linux do
       cp bundle/"Contents/MacOS/ted", bin/"ted"
     else
       bin.install "ted"
+      system "patchelf", "--set-rpath", HOMEBREW_PREFIX/"lib", bin/"ted"
       (share/"icons/hicolor/256x256/apps").install "ted.png"
     end
   end
