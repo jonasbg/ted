@@ -70,7 +70,12 @@ jobs:
           repository: jonasbg/omarchy
           ssh-key: ${{ secrets.OMARCHY_DEPLOY_KEY }}
           path: dist
-      - name: Publish signed packages and formula
+      - uses: actions/checkout@v6
+        with:
+          repository: jonasbg/homebrew-tap
+          ssh-key: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+          path: tap
+      - name: Publish signed packages, archives and formula
         env:
           PACKAGE_SIGNING_KEY: ${{ secrets.PACKAGE_SIGNING_KEY }}
         run: |
@@ -79,9 +84,8 @@ jobs:
           grep -Fx "var version = \"$version\"" main.go
           printf '%s' "$PACKAGE_SIGNING_KEY" | gpg --batch --import
           packaging/arch/publish dist /tmp/artifacts/arch/*.pkg.tar.zst
-          mkdir -p "dist/clients/$version" dist/Formula
+          mkdir -p "dist/clients/$version"
           cp /tmp/artifacts/client-*/*.tar.gz "dist/clients/$version/"
-          python packaging/brew-formula.py dist "$version" > dist/Formula/ted.rb
           cp packaging/distribution.md dist/README.md
           cp packaging/arch/enable-repo dist/enable-repo
           git -C dist config user.name 'Ted release CI'
@@ -89,3 +93,11 @@ jobs:
           git -C dist add .
           git -C dist diff --cached --quiet || git -C dist commit -m "Release Ted $version"
           git -C dist push origin HEAD:main
+          # The formula goes out after the archives it points at.
+          mkdir -p tap/Formula
+          python packaging/brew-formula.py dist "$version" > tap/Formula/ted.rb
+          git -C tap config user.name 'Ted release CI'
+          git -C tap config user.email 'actions@users.noreply.github.com'
+          git -C tap add Formula/ted.rb
+          git -C tap diff --cached --quiet || git -C tap commit -m "ted $version"
+          git -C tap push origin HEAD:main

@@ -7,7 +7,7 @@ repo = Path(sys.argv[1])
 version = sys.argv[2]
 print(f'''class Ted < Formula
   desc "Native code editor"
-  homepage "https://github.com/jonasbg/omarchy"
+  homepage "https://github.com/jonasbg/ted"
   version "{version}"
 ''')
 for os_name, cpu in [("Darwin", "arm64"), ("Darwin", "x86_64"), ("Linux", "x86_64")]:
