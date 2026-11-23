@@ -199,3 +199,13 @@ func TestVisCol(t *testing.T) {
 		t.Fatalf("colFromVis got %d", colFromVis(line, 8))
 	}
 }
+
+func TestTextSerializesUnicodeAndLineEndings(t *testing.T) {
+	for _, input := range []string{"", "one", "one\ntwo\n", "世🙂\ne\u0301"} {
+		b := newBuffer("")
+		b.setContent([]byte(input))
+		if got := b.text(); got != input {
+			t.Errorf("text() = %q, want %q", got, input)
+		}
+	}
+}

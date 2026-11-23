@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 )
 
 // Pos is a position in a buffer: line index and rune index within the line.
@@ -155,16 +156,20 @@ func splitLines(s string) [][]rune {
 
 func (b *Buffer) text() string {
 	var sb strings.Builder
-	n := 0
-	for _, l := range b.lines {
-		n += len(l) + 1
+	n := max(0, len(b.lines)-1)
+	for _, line := range b.lines {
+		for _, r := range line {
+			n += utf8.RuneLen(r)
+		}
 	}
 	sb.Grow(n)
-	for i, l := range b.lines {
+	for i, line := range b.lines {
 		if i > 0 {
 			sb.WriteByte('\n')
 		}
-		sb.WriteString(string(l))
+		for _, r := range line {
+			sb.WriteRune(r)
+		}
 	}
 	return sb.String()
 }
