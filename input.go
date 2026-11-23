@@ -70,18 +70,13 @@ func (a *App) onKey(gtx layout.Context, e key.Event) {
 				a.openSettings()
 				return
 			}
-		case "P":
+		case "K":
 			if !shift {
-				a.openQuick()
-				return
-			}
-		case "F":
-			if shift {
 				q := ""
 				if b := a.buf(); b != nil && b.hasSel() && !containsNL(b.selText()) {
 					q = string(b.selText())
 				}
-				a.openGrep(q)
+				a.openSearch(q)
 				return
 			}
 		case "Q":

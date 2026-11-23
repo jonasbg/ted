@@ -156,8 +156,7 @@ func (a *App) drawInput(gtx layout.Context, in *lineInput, r image.Rectangle, fo
 type ovKind int
 
 const (
-	ovQuick ovKind = iota
-	ovGrep
+	ovSearch ovKind = iota // Cmd+K: file names and contents, in the folder or the open tabs
 	ovPrompt
 	ovConfirm
 	ovHelp
@@ -178,6 +177,8 @@ type Overlay struct {
 	scroll    int
 	quickHits []fuzzyHit
 	grepHits  []grepHit
+	scope     searchScope
+	scopeBtn  image.Rectangle
 	gen       int
 	cancel    context.CancelFunc
 	busy      bool
@@ -224,33 +225,101 @@ func (a *App) confirm(message string, buttons []button) {
 	a.overlay = &Overlay{hover: -1, hoverBtn: -1, kind: ovConfirm, message: message, buttons: buttons}
 }
 
-func (a *App) openQuick() {
+type searchScope int
+
+const (
+	scopeFolder searchScope = iota // the folder ted was opened on
+	scopeOpen                      // the files open in tabs, unsaved edits included
+)
+
+// searchFileCap is how many file-name matches sit above the content matches
+// once something is typed, so a common word doesn't bury the text hits.
+const searchFileCap = 10
+
+// openSearch opens Cmd+K: go to file and search file contents in one list,
+// scoped to the folder or to the open tabs (Tab switches).
+func (a *App) openSearch(initial string) {
 	a.closeOverlay()
-	a.overlay = &Overlay{hover: -1, hoverBtn: -1, kind: ovQuick}
-	a.loadFiles()
-	a.overlay.updateQuick(a)
+	scope := a.searchScope
+	if a.root == "" {
+		scope = scopeOpen
+	}
+	a.overlay = &Overlay{hover: -1, hoverBtn: -1, kind: ovSearch, scope: scope}
+	a.overlay.in.set(initial)
+	if scope == scopeFolder {
+		a.loadFiles()
+	}
+	a.overlay.changed(a)
 }
 
-func (a *App) openGrep(initial string) {
+func (a *App) toggleSearchScope() {
+	o := a.overlay
 	if a.root == "" {
-		a.setMsg("Open a folder with ted <folder> to search the project")
+		a.setMsg("Open a folder with ted <folder> to search it")
 		return
 	}
-	a.closeOverlay()
-	a.overlay = &Overlay{hover: -1, hoverBtn: -1, kind: ovGrep}
-	a.overlay.in.set(initial)
-	if initial != "" {
-		a.overlay.startGrep(a)
+	if o.scope == scopeFolder {
+		o.scope = scopeOpen
+	} else {
+		o.scope = scopeFolder
+		a.loadFiles()
 	}
+	a.searchScope = o.scope
+	o.changed(a)
+}
+
+// showBuffer switches to the tab holding b.
+func (a *App) showBuffer(b *Buffer) bool {
+	for i, x := range a.bufs {
+		if x == b {
+			a.active = i
+			a.focus = focusEditor
+			return true
+		}
+	}
+	return false
+}
+
+// showLabelled switches to the open tab searchBufs labels l.
+func (a *App) showLabelled(l string, line, col int) {
+	bufs, labels := a.searchBufs()
+	for i, x := range labels {
+		if x == l && a.showBuffer(bufs[i]) {
+			if line > 0 {
+				a.gotoPos(bufs[i], line, col)
+			}
+			return
+		}
+	}
+}
+
+// searchBufs lists the open tabs the open-files scope covers, with the
+// label each is matched and shown by. Diff views are left out.
+func (a *App) searchBufs() ([]*Buffer, []string) {
+	var bufs []*Buffer
+	var labels []string
+	for _, b := range a.bufs {
+		if b.virtualKey != "" {
+			continue
+		}
+		l := b.name()
+		if b.path != "" {
+			l = a.rel(b.path)
+		}
+		bufs = append(bufs, b)
+		labels = append(labels, l)
+	}
+	return bufs, labels
 }
 
 func (o *Overlay) changed(a *App) {
 	o.sel, o.scroll = 0, 0
 	o.followSel = true
 	switch o.kind {
-	case ovQuick, ovPick:
+	case ovPick:
 		o.updateQuick(a)
-	case ovGrep:
+	case ovSearch:
+		o.updateQuick(a)
 		o.startGrep(a)
 	}
 }
@@ -275,7 +344,15 @@ func (o *Overlay) updateQuick(a *App) {
 	q, _, _ := splitLineSuffix(o.in.String())
 	q = strings.TrimPrefix(q, "./")
 	q = strings.ReplaceAll(q, " ", "")
-	o.quickHits = fuzzyFilter(q, a.files, 300)
+	files := a.files
+	if o.scope == scopeOpen {
+		_, files = a.searchBufs()
+	}
+	limit := 300
+	if q != "" {
+		limit = searchFileCap
+	}
+	o.quickHits = fuzzyFilter(q, files, limit)
 }
 
 func (o *Overlay) startGrep(a *App) {
@@ -286,6 +363,13 @@ func (o *Overlay) startGrep(a *App) {
 	q := o.in.String()
 	if strings.TrimSpace(q) == "" {
 		o.grepHits, o.busy, o.truncated = nil, false, false
+		return
+	}
+	if o.scope == scopeOpen {
+		// in memory, so unsaved edits are found too
+		bufs, labels := a.searchBufs()
+		o.grepHits, o.truncated = bufferGrep(bufs, labels, q)
+		o.busy = false
 		return
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -307,10 +391,10 @@ func (o *Overlay) startGrep(a *App) {
 
 func (o *Overlay) count() int {
 	switch o.kind {
-	case ovQuick, ovPick:
+	case ovPick:
 		return len(o.quickHits)
-	case ovGrep:
-		return len(o.grepHits)
+	case ovSearch:
+		return len(o.quickHits) + len(o.grepHits)
 	case ovHelp:
 		return len(helpRows())
 	}
@@ -374,6 +458,10 @@ func (a *App) overlayKey(e key.Event) {
 		a.overlayAccept()
 		return
 	case key.NameTab:
+		if o.kind == ovSearch {
+			a.toggleSearchScope()
+			return
+		}
 		if o.pathComplete {
 			o.in.set(completePath(a.root, o.in.String()))
 			o.in.all = false
@@ -410,28 +498,42 @@ func (a *App) overlayText(s string) {
 func (a *App) overlayAccept() {
 	o := a.overlay
 	switch o.kind {
-	case ovQuick:
+	case ovSearch:
 		p, line, col := splitLineSuffix(o.in.String())
-		a.closeOverlay()
-		if o.sel < len(o.quickHits) {
-			a.openFile(o.quickHits[o.sel].path, line, col)
-		} else if p != "" {
-			a.openFile(p, line, col)
-		}
-	case ovGrep:
-		if o.sel < len(o.grepHits) {
-			h := o.grepHits[o.sel]
+		nf := len(o.quickHits)
+		switch {
+		case o.sel < nf:
 			a.closeOverlay()
-			if a.openPreview(h.path, h.line, 1) {
+			if o.scope == scopeOpen {
+				a.showLabelled(o.quickHits[o.sel].path, line, col)
+			} else {
+				a.openFile(o.quickHits[o.sel].path, line, col)
+			}
+		case o.sel < nf+len(o.grepHits):
+			h := o.grepHits[o.sel-nf]
+			a.closeOverlay()
+			ok := false
+			if h.buf != nil {
+				ok = a.showBuffer(h.buf) && h.line <= len(h.buf.lines)
+				if ok {
+					a.gotoPos(h.buf, h.line, 1)
+				}
+			} else {
+				ok = a.openPreview(h.path, h.line, 1)
+			}
+			if ok {
 				b := a.buf()
 				col := byteToRuneCol(b.lines[b.cur.L], h.col-1)
 				q := []rune(o.in.String())
 				a.lastQ = q
 				b.anchor = Pos{b.cur.L, col}
-				b.cur = Pos{b.cur.L, col + len(q)}
+				b.cur = Pos{b.cur.L, min(len(b.lines[b.cur.L]), col+len(q))}
 				b.selecting = true
 				b.centerOnCursor = true
 			}
+		case p != "" && o.scope == scopeFolder:
+			a.closeOverlay()
+			a.openFile(p, line, col)
 		}
 	case ovPrompt:
 		a.closeOverlay()
@@ -473,6 +575,9 @@ func (a *App) drawOverlay(gtx layout.Context) {
 						o.hoverBtn = i
 					}
 				}
+				if pt.In(o.scopeBtn) {
+					o.hoverBtn = -2
+				}
 			}
 			continue
 		}
@@ -497,6 +602,10 @@ func (a *App) drawOverlay(gtx layout.Context) {
 				a.closeOverlay()
 				return
 			}
+			continue
+		}
+		if pt.In(o.scopeBtn) {
+			a.toggleSearchScope()
 			continue
 		}
 		for i, br := range o.btns {
@@ -633,28 +742,50 @@ func (a *App) drawOverlay(gtx layout.Context) {
 	switch o.kind {
 	case ovPick:
 		placeholder = o.title
-	case ovQuick:
-		placeholder = "Go to file  (name, or path:line)"
-		if a.filesLoading && len(a.files) == 0 {
-			status = "indexing…"
-		} else {
-			status = fmt.Sprintf("%d files", len(a.files))
+	case ovSearch:
+		where := "open tabs"
+		if o.scope == scopeFolder {
+			where = a.tree.root.name
 		}
-	case ovGrep:
-		placeholder = "Search in " + a.tree.root.name
+		placeholder = "Go to file or search text in " + where
 		switch {
+		case o.scope == scopeFolder && a.filesLoading && len(a.files) == 0:
+			status = "indexing…"
 		case o.busy:
 			status = "searching…"
 		case len(o.in.r) == 0:
 		case o.truncated:
-			status = fmt.Sprintf("%d+ results", len(o.grepHits))
+			status = fmt.Sprintf("%d+ matches", len(o.grepHits))
 		default:
-			status = fmt.Sprintf("%d results", len(o.grepHits))
+			status = fmt.Sprintf("%d matches", len(o.grepHits))
 		}
 	}
+	right := o.box.Max.X - gtx.Dp(16)
+	o.scopeBtn = image.Rectangle{}
+	if o.kind == ovSearch {
+		// scope chip: click or Tab switches between the folder and the open tabs
+		label := "Folder"
+		if o.scope == scopeOpen {
+			label = "Open tabs"
+		}
+		cpx := gtx.Sp(12)
+		cw := a.tc.width(fUI, cpx, label) + a.tc.width(fUI, cpx, "Tab") + gtx.Dp(26)
+		ch := gtx.Dp(24)
+		cy := by + (inputH-ch)/2
+		o.scopeBtn = image.Rect(right-cw, cy, right, cy+ch)
+		bg := th.panel2
+		if o.hoverBtn == -2 {
+			bg = mixC(bg, th.fg, 0.12)
+		}
+		rrect(ops, o.scopeBtn, gtx.Dp(6), bg)
+		cx := a.tc.draw(ops, fUI, cpx, o.scopeBtn.Min.X+gtx.Dp(9), a.uiBaseline(cy, ch), label, th.fg)
+		a.tc.draw(ops, fUI, cpx, o.scopeBtn.Min.X+gtx.Dp(17)+cx, a.uiBaseline(cy, ch), "Tab", th.dim)
+		handCursor(ops, o.scopeBtn)
+		right = o.scopeBtn.Min.X - gtx.Dp(12)
+	}
 	sw := a.tc.width(fUI, gtx.Sp(12), status)
-	a.tc.draw(ops, fUI, gtx.Sp(12), o.box.Max.X-gtx.Dp(16)-sw, a.uiBaseline(by, inputH), status, th.dim)
-	a.drawInput(gtx, &o.in, image.Rect(bx+gtx.Dp(16), by, o.box.Max.X-gtx.Dp(28)-sw, by+inputH), true, placeholder)
+	a.tc.draw(ops, fUI, gtx.Sp(12), right-sw, a.uiBaseline(by, inputH), status, th.dim)
+	a.drawInput(gtx, &o.in, image.Rect(bx+gtx.Dp(16), by, right-gtx.Dp(12)-sw, by+inputH), true, placeholder)
 	fill(ops, image.Rect(bx, by+inputH-1, bx+bw, by+inputH), th.border)
 
 	o.rowPx = rowH
@@ -670,8 +801,8 @@ func (a *App) drawOverlay(gtx layout.Context) {
 	ly := by + inputH + gtx.Dp(4)
 	if n == 0 && len(o.in.r) > 0 && !o.busy {
 		msg := "No matches"
-		if o.kind == ovQuick {
-			msg = "No matching files. Enter opens or creates this path."
+		if o.kind == ovSearch && o.scope == scopeFolder {
+			msg = "No matches. Enter opens or creates this path."
 		}
 		a.tc.draw(ops, fUI, a.ui.uiPx, bx+gtx.Dp(16), a.uiBaseline(ly, rowH), msg, th.dim)
 	}
@@ -698,7 +829,16 @@ func (a *App) drawOverlay(gtx layout.Context) {
 				cw := a.tc.width(fUI, px, "✓")
 				a.tc.draw(ops, fUI, px, ir.Max.X-gtx.Dp(12)-cw, bl, "✓", th.accent)
 			}
-		case ovQuick:
+		case ovSearch:
+			nf := len(o.quickHits)
+			if idx >= nf {
+				if idx == nf && nf > 0 {
+					// file names above, text matches below
+					fill(ops, image.Rect(ir.Min.X+gtx.Dp(10), y, ir.Max.X-gtx.Dp(10), y+1), th.border)
+				}
+				a.drawGrepRow(gtx, o, o.grepHits[idx-nf], ir, x, y, bl, rowH, bw)
+				continue
+			}
 			h := o.quickHits[idx]
 			// file name first, folder dimmed after it
 			slash := strings.LastIndexByte(h.path, '/')
@@ -712,35 +852,40 @@ func (a *App) drawOverlay(gtx layout.Context) {
 				dir = a.tc.truncateLeft(fUI, gtx.Sp(12), ir.Max.X-x-gtx.Dp(10), dir)
 				a.tc.draw(ops, fUI, gtx.Sp(12), x, bl, dir, th.dim)
 			}
-		case ovGrep:
-			h := o.grepHits[idx]
-			loc := h.path + ":" + strconv.Itoa(h.line)
-			lw := min(a.tc.width(fUI, gtx.Sp(12), loc), bw*2/5)
-			a.tc.draw(ops, fUI, gtx.Sp(12), x, bl, a.tc.truncateLeft(fUI, gtx.Sp(12), lw, loc), th.dim)
-			x += lw + gtx.Dp(14)
-			text := strings.TrimLeft(strings.ReplaceAll(h.text, "\t", " "), " ")
-			q := o.in.String()
-			lt, lq := text, q
-			if !smartCase(q) {
-				lt, lq = strings.ToLower(text), strings.ToLower(q)
-			}
-			cp := gtx.Sp(12.5)
-			avail := ir.Max.X - x - gtx.Dp(10)
-			if k := strings.Index(lt, lq); k >= 0 && lq != "" && len(lt) == len(text) {
-				pre, mid, post := text[:k], text[k:k+len(q)], text[k+len(q):]
-				// keep the match visible on long lines
-				if a.tc.width(fMono, cp, pre) > avail/2 {
-					pre = a.tc.truncateLeft(fMono, cp, avail/3, pre)
-				}
-				x += a.tc.draw(ops, fMono, cp, x, bl, pre, th.fg)
-				mw := a.tc.width(fMono, cp, mid)
-				rrect(ops, image.Rect(x-1, y+gtx.Dp(5), x+mw+1, y+rowH-gtx.Dp(5)), gtx.Dp(3), th.matchCur)
-				x += a.tc.draw(ops, fMono, cp, x, bl, mid, th.fg)
-				a.tc.draw(ops, fMono, cp, x, bl, a.tc.truncate(fMono, cp, max(0, ir.Max.X-x-gtx.Dp(10)), post), th.fg)
-			} else {
-				a.tc.draw(ops, fMono, cp, x, bl, a.tc.truncate(fMono, cp, avail, text), th.fg)
-			}
 		}
+	}
+}
+
+// drawGrepRow draws one text match: path:line dimmed, then the line with
+// the match highlighted.
+func (a *App) drawGrepRow(gtx layout.Context, o *Overlay, h grepHit, ir image.Rectangle, x, y, bl, rowH, bw int) {
+	ops := gtx.Ops
+	th := a.th
+	loc := h.path + ":" + strconv.Itoa(h.line)
+	lw := min(a.tc.width(fUI, gtx.Sp(12), loc), bw*2/5)
+	a.tc.draw(ops, fUI, gtx.Sp(12), x, bl, a.tc.truncateLeft(fUI, gtx.Sp(12), lw, loc), th.dim)
+	x += lw + gtx.Dp(14)
+	text := strings.TrimLeft(strings.ReplaceAll(h.text, "\t", " "), " ")
+	q := o.in.String()
+	lt, lq := text, q
+	if !smartCase(q) {
+		lt, lq = strings.ToLower(text), strings.ToLower(q)
+	}
+	cp := gtx.Sp(12.5)
+	avail := ir.Max.X - x - gtx.Dp(10)
+	if k := strings.Index(lt, lq); k >= 0 && lq != "" && len(lt) == len(text) {
+		pre, mid, post := text[:k], text[k:k+len(q)], text[k+len(q):]
+		// keep the match visible on long lines
+		if a.tc.width(fMono, cp, pre) > avail/2 {
+			pre = a.tc.truncateLeft(fMono, cp, avail/3, pre)
+		}
+		x += a.tc.draw(ops, fMono, cp, x, bl, pre, th.fg)
+		mw := a.tc.width(fMono, cp, mid)
+		rrect(ops, image.Rect(x-1, y+gtx.Dp(5), x+mw+1, y+rowH-gtx.Dp(5)), gtx.Dp(3), th.matchCur)
+		x += a.tc.draw(ops, fMono, cp, x, bl, mid, th.fg)
+		a.tc.draw(ops, fMono, cp, x, bl, a.tc.truncate(fMono, cp, max(0, ir.Max.X-x-gtx.Dp(10)), post), th.fg)
+	} else {
+		a.tc.draw(ops, fMono, cp, x, bl, a.tc.truncate(fMono, cp, avail, text), th.fg)
 	}
 }
 
@@ -1070,7 +1215,7 @@ func helpRows() [][2]string {
 	}
 	return [][2]string{
 		{"Files", ""},
-		{c + "+P", "Go to file (fuzzy, accepts path:line)"},
+		{c + "+K", "Go to file and search text (Tab: folder / open tabs)"},
 		{c + "+O", "Open a path"},
 		{c + "+N", "New untitled scratch file (" + c + "+S names it)"},
 		{c + "+S", "Save"},
@@ -1082,7 +1227,6 @@ func helpRows() [][2]string {
 		{"Search", ""},
 		{c + "+F", "Find in file"},
 		{c + "+Alt+F / " + c + "+H", "Replace"},
-		{c + "+Shift+F", "Search in project"},
 		{c + "+G / F3", "Next match (Shift for previous)"},
 		{c + "+D", "Select word, then next occurrence"},
 		{"Ctrl+G", "Go to line"},

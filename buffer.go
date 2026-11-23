@@ -159,7 +159,11 @@ func (b *Buffer) text() string {
 	n := max(0, len(b.lines)-1)
 	for _, line := range b.lines {
 		for _, r := range line {
-			n += utf8.RuneLen(r)
+			if l := utf8.RuneLen(r); l > 0 {
+				n += l
+			} else {
+				n += 3 // WriteRune writes U+FFFD for invalid runes
+			}
 		}
 	}
 	sb.Grow(n)

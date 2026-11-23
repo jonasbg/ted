@@ -90,7 +90,7 @@ func BenchmarkGitStatus10k(b *testing.B) {
 	}
 	run("init", "-q")
 	run("add", ".")
-	run("-c", "user.name=Benchmark", "-c", "user.email=benchmark@example.invalid", "commit", "-qm", "fixture")
+	run("-c", "user.name=Benchmark", "-c", "user.email=benchmark@example.invalid", "-c", "commit.gpgsign=false", "commit", "-qm", "fixture")
 	if err := os.WriteFile(filepath.Join(root, "pkg00/file0000.go"), []byte("package changed\n"), 0o600); err != nil {
 		b.Fatal(err)
 	}
