@@ -41,8 +41,10 @@ there instead of starting another window.
   The status bar shows count, sum and average of the selected cells (click
   it for min and max). Cmd/Ctrl+C copies a cell block as tab-separated rows,
   ready to paste into a spreadsheet.
-- Search: find and replace, fuzzy *go to file* (Cmd/Ctrl+P), and project-wide
-  search (Cmd/Ctrl+Shift+F) that uses ripgrep when available.
+- Search: find and replace, and Cmd/Ctrl+K, one box that fuzzy-matches file
+  names (accepts path:line) and lists text matches below them. Tab switches
+  it between the open folder (ripgrep when available) and the open tabs,
+  unsaved edits included.
 - Files changed on disk, for example by an AI agent, git or a formatter,
   reload automatically if you have no unsaved edits. Only the changed region
   is replaced, so the cursor stays put, and **undo restores your previous
@@ -71,8 +73,16 @@ send Ctrl/Shift+Insert, which Gio does not support yet. Super+X (Shift+Delete)
 cuts.
 
 ## Install
-Signed Omarchy packages and Homebrew builds for macOS and Linux are available
-in the [jonasbg distribution repository](https://github.com/jonasbg/omarchy).
+With Homebrew, on macOS or Linux:
+
+```sh
+brew install jonasbg/tap/ted
+```
+
+On macOS the app bundle is at `$(brew --prefix ted)/ted.app`; link it into
+`~/Applications` to get it in Spotlight and *Open With*. Signed Omarchy
+(pacman) packages are in the
+[jonasbg distribution repository](https://github.com/jonasbg/omarchy).
 
 
 Requires Go 1.27 or newer and a C compiler (cgo).

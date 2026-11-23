@@ -70,8 +70,10 @@ type App struct {
 
 	files          []string
 	filesLoading   bool
+	searchScope    searchScope // Cmd+K scope last chosen with Tab
 	lastGitRefresh time.Time
 	gitBusy        bool
+	gitAgain       bool // a refresh was asked for while one ran; rerun when it lands
 	branch         string
 	tickN          int
 	sessionSig     string
@@ -481,7 +483,12 @@ func (a *App) gitPollInterval() time.Duration {
 }
 
 func (a *App) refreshGit() {
-	if a.tree.gitRoot == "" || a.gitBusy {
+	if a.tree.gitRoot == "" {
+		return
+	}
+	if a.gitBusy {
+		// The running snapshot may predate the change that asked for this one.
+		a.gitAgain = true
 		return
 	}
 	a.gitBusy = true
@@ -554,7 +561,7 @@ func (a *App) drainPending() {
 		case filesEvent:
 			a.filesLoading = false
 			a.files = d.files
-			if o := a.overlay; o != nil && o.kind == ovQuick {
+			if o := a.overlay; o != nil && o.kind == ovSearch && o.scope == scopeFolder {
 				o.updateQuick(a)
 			}
 		case gitEvent:
@@ -562,12 +569,18 @@ func (a *App) drainPending() {
 			a.tree.git = d.s.status
 			a.branch = d.s.branch
 			a.applyGit(d.s)
+			if a.gitAgain {
+				a.gitAgain = false
+				a.refreshGit()
+			}
 		case grepEvent:
-			if o := a.overlay; o != nil && o.kind == ovGrep && o.gen == d.gen {
+			if o := a.overlay; o != nil && o.kind == ovSearch && o.gen == d.gen {
 				o.grepHits = d.hits
 				o.truncated = d.truncated
 				o.busy = false
-				o.sel, o.scroll = 0, 0
+				if o.sel >= len(o.quickHits) {
+					o.sel, o.scroll = 0, 0
+				}
 			}
 		case openEvent:
 			for _, t := range d.targets {

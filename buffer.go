@@ -160,10 +160,13 @@ func (b *Buffer) text() string {
 	n := max(0, len(b.lines)-1)
 	for _, line := range b.lines {
 		for _, r := range line {
-			if r < utf8.RuneSelf {
+			switch l := utf8.RuneLen(r); {
+			case r < utf8.RuneSelf:
 				n++
-			} else {
-				n += utf8.RuneLen(r)
+			case l > 0:
+				n += l
+			default:
+				n += 3 // AppendRune writes U+FFFD for invalid runes
 			}
 		}
 	}

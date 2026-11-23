@@ -168,8 +168,7 @@ func (a *App) drawWelcome(gtx layout.Context, r image.Rectangle) {
 	fill(ops, r, th.bg)
 	sc := shortcutName()
 	lines := [][2]string{
-		{"Go to file", sc + "+P"},
-		{"Search in project", sc + "+Shift+F"},
+		{"Go to file or search", sc + "+K"},
 		{"New file", sc + "+N"},
 		{"Toggle file tree", sc + "+B"},
 		{"All shortcuts", "F1"},

@@ -19,7 +19,7 @@ import (
 	"gioui.org/unit"
 )
 
-var version = "0.2.6"
+var version = "0.2.7"
 
 const defaultFontSp = 14
 
@@ -231,6 +231,10 @@ func (a *App) loop() error {
 			a.saveSession()
 			return e.Err
 		case app.ConfigEvent:
+			if e.Config.Focused && !a.focused {
+				// catch up on commits and checkouts made in a terminal
+				a.refreshGit()
+			}
 			a.focused = e.Config.Focused
 		case app.FrameEvent:
 			gtx := app.NewContext(&ops, e)

@@ -136,7 +136,8 @@ func TestGitSnapshotPreservesChangesAndTreeStatus(t *testing.T) {
 		}
 	}
 
-	git("init", "--initial-branch=main")
+	git("init")
+	git("symbolic-ref", "HEAD", "refs/heads/main") // --initial-branch needs git 2.28
 	git("config", "user.name", "Ted Test")
 	git("config", "user.email", "ted-test@example.com")
 	git("config", "commit.gpgsign", "false")
