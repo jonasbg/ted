@@ -47,6 +47,9 @@ func gitOut(root string, args ...string) ([]byte, error) {
 
 // Read status once for both views. Only the Changes panel caps its row count.
 func readGitStatus(root string) (map[string]byte, []gitChange) {
+	// Optional locks stay on: GIT_OPTIONAL_LOCKS=0 would stop git saving its
+	// refreshed index, and every poll would re-check the stale entries (2x
+	// slower in BenchmarkGitStatus10k).
 	data, err := exec.Command("git", "-C", root, "status", "--porcelain=v1", "-z", "-uall", "--ignore-submodules").Output()
 	if err != nil {
 		return nil, nil

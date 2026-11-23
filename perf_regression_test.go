@@ -1,9 +1,11 @@
 package main
 
 import (
+	"math/rand/v2"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -39,6 +41,76 @@ func TestMaxColsAcrossEdits(t *testing.T) {
 	b.cur = Pos{}
 	b.insert([]rune("世"), "")
 	check("edit the empty buffer", 2)
+}
+
+// Random edits must keep the incremental widths equal to a full measure.
+func TestMaxColsMatchesFullScanUnderRandomEdits(t *testing.T) {
+	rng := rand.New(rand.NewPCG(1, 2))
+	b := newBuffer("")
+	b.setContent([]byte("a\nbb\n\tccc\n世界\n"))
+	b.maxCols()
+	pieces := []string{"x", "yyyyyyyy", "\n", "\t", "世", "\nzz\nwww\n", strings.Repeat("m", 400)}
+	for step := 0; step < 3000; step++ {
+		l := rng.IntN(len(b.lines))
+		p := Pos{l, rng.IntN(len(b.lines[l]) + 1)}
+		switch rng.IntN(4) {
+		case 0, 1:
+			b.cur = p
+			b.insert([]rune(pieces[rng.IntN(len(pieces))]), "")
+		case 2:
+			l2 := min(len(b.lines)-1, l+rng.IntN(3))
+			q := Pos{l2, rng.IntN(len(b.lines[l2]) + 1)}
+			if q.Less(p) {
+				p, q = q, p
+			}
+			b.deleteRange(p, q, "")
+		case 3:
+			if rng.IntN(2) == 0 {
+				b.doUndo()
+			} else {
+				b.doRedo()
+			}
+		}
+		want := 0
+		for _, line := range b.lines {
+			want = max(want, visCol(line, len(line)))
+		}
+		if got := b.maxCols(); got != want {
+			t.Fatalf("step %d: maxCols() = %d, full scan = %d", step, got, want)
+		}
+		if len(b.lineWidths) != len(b.lines) {
+			t.Fatalf("step %d: %d widths for %d lines", step, len(b.lineWidths), len(b.lines))
+		}
+	}
+}
+
+func TestTextRoundTripsUnicode(t *testing.T) {
+	for _, s := range []string{"", "\n", "a", "café\n世界 🚀\n\n", "tail\n"} {
+		b := newBuffer("")
+		b.setContent([]byte(s))
+		if got := b.text(); got != s {
+			t.Errorf("text() = %q, want %q", got, s)
+		}
+	}
+}
+
+func TestCSVEmptySelectionStatsAreCached(t *testing.T) {
+	b := newBuffer("x.csv")
+	b.setContent([]byte("a,b\n1,\n2,\n"))
+	b.setCSV(',')
+	b.startBlock(Pos{0, 2}, false)
+	if _, ok := b.selectionStats(); ok {
+		t.Fatal("empty column reported values")
+	}
+	if !b.csv.statsOK {
+		t.Fatal("empty result was not cached")
+	}
+	b.cur = Pos{1, 2}
+	b.insert([]rune("5"), "") // a new version invalidates the cache
+	st, ok := b.selectionStats()
+	if !ok || st.numbers != 1 || st.sum != 5 {
+		t.Fatalf("stats after edit = %+v, %v", st, ok)
+	}
 }
 
 func TestGitSnapshotPreservesChangesAndTreeStatus(t *testing.T) {

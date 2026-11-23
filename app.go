@@ -77,6 +77,9 @@ type App struct {
 	branch         string
 	tickN          int
 	sessionSig     string
+	sessionSeq     uint64     // last session snapshot taken (UI goroutine)
+	sessionMu      sync.Mutex // serializes session file writes
+	sessionDone    uint64     // newest snapshot written, under sessionMu
 
 	lineCopy    string
 	pasteTarget focusArea
@@ -604,7 +607,7 @@ func (a *App) drainPending() {
 				a.refreshGit()
 			}
 			if a.tickN%3 == 0 {
-				a.saveSessionIfChanged()
+				a.autosaveSession()
 			}
 		}
 	}

@@ -19,7 +19,7 @@ import (
 	"gioui.org/unit"
 )
 
-var version = "0.2.7"
+var version = "0.2.8"
 
 const defaultFontSp = 14
 

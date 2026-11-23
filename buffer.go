@@ -11,6 +11,7 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+	"unsafe"
 )
 
 // Pos is a position in a buffer: line index and rune index within the line.
@@ -78,8 +79,9 @@ type Buffer struct {
 	scrollY        int     // first visible line, kept for the highlighter
 	vy, vx         float32 // scroll offsets in pixels
 	centerOnCursor bool
-	widest         int // cached width of the widest line, in columns
-	lineWidths     []int
+	widest         int         // cached width of the widest line, in columns
+	lineWidths     []int       // width of each line, in columns; nil until first display
+	widthCount     map[int]int // how many lines have each width
 	lineStarts     []int
 	lineStartsVer  int
 
@@ -139,7 +141,7 @@ func (b *Buffer) setContent(data []byte) {
 		s = strings.ReplaceAll(s, "\r\n", "\n")
 	}
 	b.lines = splitLines(s)
-	b.lineWidths = nil
+	b.lineWidths, b.widthCount = nil, nil
 	b.widest = 0
 	b.indent = detectIndent(b.lines, b.path)
 	b.version++
@@ -155,27 +157,37 @@ func splitLines(s string) [][]rune {
 }
 
 func (b *Buffer) text() string {
-	var sb strings.Builder
 	n := max(0, len(b.lines)-1)
 	for _, line := range b.lines {
 		for _, r := range line {
-			if l := utf8.RuneLen(r); l > 0 {
+			switch l := utf8.RuneLen(r); {
+			case r < utf8.RuneSelf:
+				n++
+			case l > 0:
 				n += l
-			} else {
-				n += 3 // WriteRune writes U+FFFD for invalid runes
+			default:
+				n += 3 // AppendRune writes U+FFFD for invalid runes
 			}
 		}
 	}
-	sb.Grow(n)
+	if n == 0 {
+		return ""
+	}
+	buf := make([]byte, 0, n)
 	for i, line := range b.lines {
 		if i > 0 {
-			sb.WriteByte('\n')
+			buf = append(buf, '\n')
 		}
 		for _, r := range line {
-			sb.WriteRune(r)
+			if r < utf8.RuneSelf {
+				buf = append(buf, byte(r))
+			} else {
+				buf = utf8.AppendRune(buf, r)
+			}
 		}
 	}
-	return sb.String()
+	// buf is never touched again, so the string can share its memory
+	return unsafe.String(unsafe.SliceData(buf), len(buf))
 }
 
 func (b *Buffer) name() string {
@@ -295,11 +307,7 @@ func (b *Buffer) rawInsert(p Pos, text []rune) Pos {
 	last := segs[len(segs)-1]
 	newLines[len(segs)-1] = append(append([]rune(nil), last...), tail...)
 	b.hl.spliceLines(p.L+1, 0, len(segs)-1)
-	out := make([][]rune, 0, len(b.lines)+len(segs)-1)
-	out = append(out, b.lines[:p.L]...)
-	out = append(out, newLines...)
-	out = append(out, b.lines[p.L+1:]...)
-	b.lines = out
+	b.lines = slices.Replace(b.lines, p.L, p.L+1, newLines...)
 	b.updateWidths(p.L, 1, len(newLines))
 	return Pos{p.L + len(segs) - 1, len(last)}
 }
@@ -334,11 +342,7 @@ func (b *Buffer) rawDelete(a, c Pos) []rune {
 		return removed
 	}
 	b.hl.spliceLines(a.L+1, c.L-a.L, 0)
-	out := make([][]rune, 0, len(b.lines)-(c.L-a.L))
-	out = append(out, b.lines[:a.L]...)
-	out = append(out, nl)
-	out = append(out, b.lines[c.L+1:]...)
-	b.lines = out
+	b.lines = slices.Replace(b.lines, a.L, c.L+1, nl)
 	b.updateWidths(a.L, c.L-a.L+1, 1)
 	return removed
 }
@@ -676,36 +680,61 @@ func isWordRune(r rune) bool {
 	return r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r)
 }
 
-// Widths are initialized on first display. Edits only measure changed lines.
+// Widths are measured on first display; after that edits only measure the
+// lines they change, and a per-width line count finds the next widest line
+// without rescanning the file.
 func (b *Buffer) maxCols() int {
 	if b.lineWidths == nil {
 		b.lineWidths = make([]int, len(b.lines))
-		b.updateWidths(0, len(b.lines), len(b.lines))
+		b.widthCount = make(map[int]int)
+		b.widest = 0
+		for i, line := range b.lines {
+			w := visCol(line, len(line))
+			b.lineWidths[i] = w
+			b.widthCount[w]++
+			b.widest = max(b.widest, w)
+		}
 	}
 	return b.widest
 }
 
+// updateWidths re-measures lines after oldCount lines starting at first were
+// replaced by newCount lines.
 func (b *Buffer) updateWidths(first, oldCount, newCount int) {
 	if b.lineWidths == nil {
 		return
 	}
-	oldMax := b.widest
-	removedMax := slices.Contains(b.lineWidths[first:first+oldCount], oldMax)
+	for _, w := range b.lineWidths[first : first+oldCount] {
+		if b.widthCount[w]--; b.widthCount[w] <= 0 {
+			delete(b.widthCount, w)
+		}
+	}
 	if newCount < oldCount {
 		b.lineWidths = slices.Delete(b.lineWidths, first+newCount, first+oldCount)
 	} else if newCount > oldCount {
 		b.lineWidths = slices.Insert(b.lineWidths, first+oldCount, make([]int, newCount-oldCount)...)
 	}
-	newMax := 0
 	for i := first; i < first+newCount; i++ {
 		line := b.lines[i]
 		w := visCol(line, len(line))
 		b.lineWidths[i] = w
-		newMax = max(newMax, w)
+		b.widthCount[w]++
+		b.widest = max(b.widest, w)
 	}
-	if removedMax && newMax < oldMax {
-		b.widest = slices.Max(b.lineWidths)
-	} else {
-		b.widest = max(oldMax, newMax)
+	if b.widthCount[b.widest] > 0 {
+		return
+	}
+	// The widest line got narrower or went away: step down to the next width
+	// in use. Shortening a line by a few columns costs a few steps; after a
+	// big drop (a minified line deleted) take the max over the distinct widths.
+	for steps := 0; b.widest > 0 && b.widthCount[b.widest] == 0; steps++ {
+		if steps == 256 {
+			b.widest = 0
+			for w := range b.widthCount {
+				b.widest = max(b.widest, w)
+			}
+			break
+		}
+		b.widest--
 	}
 }

@@ -20,6 +20,13 @@ type csvState struct {
 
 	statsKey statsKey
 	stats    csvStats
+	statsOK  bool // stats match statsKey
+
+	// scratch reused across lines while drawing, so a frame doesn't
+	// allocate per visible line
+	fieldBuf []field
+	spanBuf  []span
+	blockBuf []field
 }
 
 // cellBlock is a rectangle of cells from an anchor to a cursor cell. With
@@ -88,7 +95,12 @@ func sniffDelim(sample string) rune {
 // csvFields splits one line into fields, honouring double-quoted fields
 // with "" escapes. Quoted fields spanning lines are treated per line.
 func csvFields(line []rune, delim rune) []field {
-	out := make([]field, 0, 16)
+	return csvFieldsInto(make([]field, 0, 16), line, delim)
+}
+
+// csvFieldsInto is csvFields appending to out[:0], reusing its memory.
+func csvFieldsInto(out []field, line []rune, delim rune) []field {
+	out = out[:0]
 	start, inQ := 0, false
 	for i, r := range line {
 		switch {
@@ -115,6 +127,9 @@ func fieldAt(fs []field, c int) int {
 // cellText is a field's value with surrounding quotes removed.
 func cellText(line []rune, f field) string {
 	s := strings.TrimSpace(string(line[f.start:f.end]))
+	if s == "" {
+		return s
+	}
 	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
 		s = strings.ReplaceAll(s[1:len(s)-1], `""`, `"`)
 	}
@@ -125,6 +140,10 @@ func cellText(line []rune, f field) string {
 // currency signs, a trailing % and a decimal comma (when unambiguous).
 func parseNumber(s string) (float64, bool) {
 	s = strings.TrimSpace(s)
+	// plain numbers, the common case, parse without the clean-up copies
+	if v, err := strconv.ParseFloat(s, 64); err == nil {
+		return v, !math.IsNaN(v) && !math.IsInf(v, 0)
+	}
 	s = strings.TrimLeft(s, "$€£¥")
 	s = strings.TrimSuffix(s, "%")
 	s = strings.ReplaceAll(s, " ", "")
@@ -177,18 +196,22 @@ func (t *Theme) rainbow() []color.NRGBA {
 }
 
 // csvSpans colours each field of a line by its column; delimiters are dim
-// and the header row is bold.
+// and the header row is bold. The result is only valid until the next call
+// for the same buffer: callers draw one line before asking for the next.
 func (a *App) csvSpans(b *Buffer, li int) []span {
 	line := b.lines[li]
 	pal := a.th.rainbow()
-	fs := csvFields(line, b.csv.delim)
-	out := make([]span, 0, 2*len(fs))
+	cs := b.csv
+	fs := csvFieldsInto(cs.fieldBuf, line, cs.delim)
+	cs.fieldBuf = fs
+	out := cs.spanBuf[:0]
 	for i, f := range fs {
 		out = append(out, span{f.start, tokStyle{fg: pal[i%len(pal)], bold: li == 0}})
 		if f.end < len(line) {
 			out = append(out, span{f.end, tokStyle{fg: a.th.dim}})
 		}
 	}
+	cs.spanBuf = out
 	return out
 }
 
@@ -219,9 +242,10 @@ type csvStats struct {
 func (b *Buffer) eachSelectedCell(f func(line []rune, fl field)) {
 	if k := b.csv.block; k != nil {
 		r0, r1, c0, c1 := b.blockBounds()
+		var fs []field
 		for li := r0; li <= r1; li++ {
 			line := b.lines[li]
-			fs := csvFields(line, b.csv.delim)
+			fs = csvFieldsInto(fs, line, b.csv.delim)
 			for c := c0; c <= c1 && c < len(fs); c++ {
 				f(line, fs[c])
 			}
@@ -229,6 +253,7 @@ func (b *Buffer) eachSelectedCell(f func(line []rune, fl field)) {
 		return
 	}
 	s, e := b.selRange()
+	var fs []field
 	for li := s.L; li <= e.L; li++ {
 		line := b.lines[li]
 		sc, ec := 0, len(line)
@@ -241,7 +266,8 @@ func (b *Buffer) eachSelectedCell(f func(line []rune, fl field)) {
 				break // selection ends at the start of this line
 			}
 		}
-		for _, fl := range csvFields(line, b.csv.delim) {
+		fs = csvFieldsInto(fs, line, b.csv.delim)
+		for _, fl := range fs {
 			if fl.end >= sc && fl.start <= ec && !(fl.start == ec && ec > sc && li == e.L) {
 				f(line, fl)
 			}
@@ -261,8 +287,10 @@ func (b *Buffer) selectionStats() (csvStats, bool) {
 	} else {
 		key.s, key.e = b.selRange()
 	}
-	if key == cs.statsKey && cs.stats.cells > 0 {
-		return cs.stats, true
+	if cs.statsOK && key == cs.statsKey {
+		// cached even when nothing counted, so an empty column isn't
+		// re-read every frame
+		return cs.stats, cs.stats.cells > 0
 	}
 	var st csvStats
 	b.eachSelectedCell(func(line []rune, fl field) {
@@ -282,7 +310,7 @@ func (b *Buffer) selectionStats() (csvStats, bool) {
 			st.sum += v
 		}
 	})
-	cs.statsKey, cs.stats = key, st
+	cs.statsKey, cs.stats, cs.statsOK = key, st, true
 	return st, st.cells > 0
 }
 
@@ -414,7 +442,8 @@ func (b *Buffer) blockText() string {
 	return sb.String()
 }
 
-// blockCells returns the field ranges to highlight on line li.
+// blockCells returns the field ranges to highlight on line li, valid until
+// the next call.
 func (b *Buffer) blockCells(li int) []field {
 	k := b.csv.block
 	if k == nil {
@@ -427,7 +456,8 @@ func (b *Buffer) blockCells(li int) []field {
 	if li < r0 || li > r1 {
 		return nil
 	}
-	fs := csvFields(b.lines[li], b.csv.delim)
+	fs := csvFieldsInto(b.csv.blockBuf, b.lines[li], b.csv.delim)
+	b.csv.blockBuf = fs
 	if c0 >= len(fs) {
 		return nil
 	}
