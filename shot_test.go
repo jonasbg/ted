@@ -337,27 +337,50 @@ func TestPreviewTabs(t *testing.T) {
 	}
 }
 
-func TestNoHorizontalScrollByMouse(t *testing.T) {
+func TestHorizontalScrollByMouse(t *testing.T) {
 	dir := t.TempDir()
+	long := strings.Repeat("x", 300)
+	short := strings.Repeat("short\n", 200)
 	p := filepath.Join(dir, "w.txt")
-	os.WriteFile(p, []byte("short\n"+strings.Repeat("x", 300)+"\nend\n"), 0o644)
+	os.WriteFile(p, []byte(short+long+"\nend\n"), 0o644)
 	h := newHarness(t, dir, p)
 	ed := h.a.ui.text
 	pos := f32.Pt(float32(ed.Min.X+100), float32(ed.Min.Y+100))
 	b := h.a.buf()
-	for _, ev := range []pointer.Event{
-		{Kind: pointer.Scroll, Source: pointer.Mouse, Position: pos, Scroll: f32.Pt(500, 0)},
-		{Kind: pointer.Scroll, Source: pointer.Mouse, Position: pos, Scroll: f32.Pt(0, 40), Modifiers: key.ModShift},
-		{Kind: pointer.Scroll, Source: pointer.Mouse, Position: pos, Scroll: f32.Pt(30, 30)},
-	} {
-		h.r.Queue(ev)
+	scroll := func(d f32.Point, mods key.Modifiers) {
+		h.r.Queue(pointer.Event{Kind: pointer.Scroll, Source: pointer.Mouse, Position: pos, Scroll: d, Modifiers: mods})
 		h.frame()
-		if b.vx != 0 {
-			t.Fatalf("mouse scrolled sideways: vx=%v after %+v", b.vx, ev.Scroll)
-		}
 	}
+	// the long line is off screen: nothing visible overflows, so no sideways scroll
+	scroll(f32.Pt(500, 0), 0)
+	if b.vx != 0 {
+		t.Fatalf("scrolled sideways with nothing overflowing: vx=%v", b.vx)
+	}
+	// bring the long line into view
+	b.vy = float32(190 * h.a.ui.lineH)
+	h.frame()
+	// a diagonal swipe stays vertical
+	vy := b.vy
+	scroll(f32.Pt(30, 30), 0)
+	if b.vx != 0 || b.vy == vy {
+		t.Fatalf("diagonal swipe: vx=%v vy=%v (was %v)", b.vx, b.vy, vy)
+	}
+	scroll(f32.Pt(200, 0), 0)
+	if b.vx != 200 {
+		t.Fatalf("sideways swipe: vx=%v, want 200", b.vx)
+	}
+	scroll(f32.Pt(-500, 0), 0)
+	if b.vx != 0 {
+		t.Fatalf("swipe back: vx=%v, want 0", b.vx)
+	}
+	scroll(f32.Pt(0, 40), key.ModShift)
+	if b.vx != 40 {
+		t.Fatalf("shift+wheel: vx=%v, want 40", b.vx)
+	}
+	b.vx = 0
+
 	// the caret still pulls the view along a long line
-	b.cur = Pos{1, 300}
+	b.cur = Pos{200, 300}
 	h.a.follow = true
 	h.frame()
 	if b.vx <= 0 {

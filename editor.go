@@ -426,7 +426,7 @@ func (a *App) posAtPoint(b *Buffer, p f32.Point) Pos {
 	return Pos{l, colFromVisRound(b.lines[l], vc)}
 }
 
-func (a *App) editorPointer(gtx layout.Context, b *Buffer, maxVy, _ float32) {
+func (a *App) editorPointer(gtx layout.Context, b *Buffer, maxVy, maxVx float32) {
 	u := &a.ui
 	for {
 		ev, ok := gtx.Event(pointer.Filter{Target: &u.editorTag, Kinds: pointer.Press | pointer.Drag | pointer.Release | pointer.Scroll | pointer.Cancel,
@@ -437,13 +437,28 @@ func (a *App) editorPointer(gtx layout.Context, b *Buffer, maxVy, _ float32) {
 		e := ev.(pointer.Event)
 		switch e.Kind {
 		case pointer.Scroll:
-			// Vertical only: the mouse and trackpad never scroll sideways.
-			// The view still follows the caret along long lines.
-			dy := e.Scroll.Y
-			if abs32(e.Scroll.X) > 2*abs32(dy) {
-				dy = 0 // a sideways swipe shouldn't nudge the view up or down
+			// Lock to the dominant axis so a vertical swipe doesn't drift
+			// sideways and a sideways swipe doesn't nudge the view up or down.
+			dx, dy := e.Scroll.X, e.Scroll.Y
+			if e.Modifiers.Contain(key.ModShift) && dx == 0 {
+				dx, dy = dy, 0 // shift+wheel scrolls sideways on plain mice
+			}
+			if abs32(dx) > 2*abs32(dy) {
+				dy = 0
+			} else {
+				dx = 0
 			}
 			b.vy = max(0, min(maxVy, b.vy+dy))
+			if dx != 0 {
+				// Only as far as the lines on screen overflow, so a stray
+				// swipe does nothing when everything visible already fits.
+				// Scrolling back left is always allowed.
+				limit := min(maxVx, a.visibleOverflow(b))
+				if dx < 0 {
+					limit = max(limit, b.vx)
+				}
+				b.vx = max(0, min(limit, b.vx+dx))
+			}
 		case pointer.Press:
 			if e.Buttons != pointer.ButtonPrimary {
 				continue
@@ -611,4 +626,20 @@ func diffLineBg(th *Theme, line []rune) color.NRGBA {
 		return th.diffHunk
 	}
 	return color.NRGBA{}
+}
+
+// visibleOverflow is how far the widest line on screen runs past the
+// right edge of the text area, in pixels; 0 when every visible line fits.
+func (a *App) visibleOverflow(b *Buffer) float32 {
+	u := &a.ui
+	lineH, charW := max(1, u.lineH), u.charW
+	b.maxCols() // make sure lineWidths is filled
+	first := max(0, int(b.vy)/lineH)
+	last := min(len(b.lineWidths), first+u.text.Dy()/lineH+2)
+	widest := 0
+	for i := first; i < last; i++ {
+		widest = max(widest, b.lineWidths[i])
+	}
+	textW := u.text.Dx() - u.padLeft - charW
+	return float32(max(0, widest*charW+2*charW-textW))
 }
