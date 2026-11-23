@@ -23,6 +23,7 @@ type sessionTab struct {
 	Unsaved *string `json:"unsaved,omitempty"`
 	Preview bool    `json:"preview,omitempty"`
 	Md      bool    `json:"md_preview,omitempty"`
+	MdVy    float32 `json:"md_vy,omitempty"`
 	DiskMod int64   `json:"disk_mod,omitempty"`
 }
 
@@ -101,6 +102,9 @@ func (a *App) sessionSnapshot() (uint64, sessionFile) {
 	s := sessionFile{Root: a.root, Active: a.active, Sidebar: a.showSidebar, Width: a.sidebarDp, Font: a.fontSp, Dotfile: a.tree.showHidden, NoWeb: a.noWeb}
 	for _, b := range a.bufs {
 		t := sessionTab{Path: b.path, Line: b.cur.L + 1, Col: b.cur.C + 1, Vy: b.vy, Preview: b.preview, Md: b.previewing()}
+		if t.Md {
+			t.MdVy = b.md.vy
+		}
 		if b.dirty() {
 			txt := b.text()
 			t.Unsaved = &txt
@@ -192,8 +196,18 @@ func (a *App) restoreSession(root string, unsavedOnly bool) {
 		b.cur = b.clamp(Pos{t.Line - 1, t.Col - 1})
 		b.selecting = false
 		b.vy = t.Vy
-		if t.Md && isMarkdown(b) {
-			b.md = &mdState{on: true, hoverLink: -1, sync: t.Line - 1}
+		if t.Md {
+			if b.path == "" {
+				// an untitled buffer is Markdown only by choice; that choice
+				// is what put it in preview, so restore it
+				b.setLanguage("markdown")
+			}
+			if isMarkdown(b) {
+				b.md = &mdState{on: true, hoverLink: -1, sync: t.Line - 1, vy: t.MdVy}
+				if t.MdVy > 0 {
+					b.md.sync = -1 // back where the preview was scrolled to
+				}
+			}
 		}
 	}
 	if active >= 0 {

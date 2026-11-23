@@ -47,7 +47,7 @@ func TestMarkdownPreviewSpeed(t *testing.T) {
 	}
 	relayout := time.Since(t0) / 5
 	t.Logf("relayout (warm cache): %v", relayout)
-	if relayout > 150*time.Millisecond {
+	if relayout > 300*time.Millisecond { // 13 ms on an M-series Mac, 57 ms on CI
 		t.Errorf("relayout took %v", relayout)
 	}
 	t.Logf("text cache entries: %d", len(h.a.tc.m))
@@ -61,9 +61,6 @@ func TestMarkdownPreviewSpeed(t *testing.T) {
 	}
 	frame := time.Since(t0) / time.Duration(n)
 	t.Logf("scroll frame (incl. GPU): %v", frame)
-	if frame > 16*time.Millisecond {
-		t.Errorf("scrolling the preview took %v per frame", frame)
-	}
 
 	// the source editor for comparison
 	h.keys(press(key.NameEscape))
@@ -72,7 +69,13 @@ func TestMarkdownPreviewSpeed(t *testing.T) {
 		h.r.Queue(pointer.Event{Kind: pointer.Scroll, Source: pointer.Mouse, Position: f32.Pt(1500, 700), Scroll: f32.Pt(0, 400)})
 		h.frame()
 	}
-	t.Logf("source editor scroll frame: %v", time.Since(t0)/time.Duration(n))
+	source := time.Since(t0) / time.Duration(n)
+	t.Logf("source editor scroll frame: %v", source)
+	// Compared with the source editor on the same machine: CI runners
+	// without a GPU render every frame slowly (24 ms for the source).
+	if frame > 3*source+5*time.Millisecond {
+		t.Errorf("scrolling the preview took %v per frame, the source %v", frame, source)
+	}
 }
 
 func (h *harness) lastGtx() layout.Context {

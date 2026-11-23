@@ -340,3 +340,16 @@ func (h *highlightState) spliceLines(i, del, ins int) {
 	}
 	h.spans = slices.Replace(h.spans, i, i+del, fills...)
 }
+
+// setLanguage highlights b as the named language, as if picked by hand.
+func (b *Buffer) setLanguage(name string) {
+	l := lexers.Get(name)
+	if l == nil {
+		return
+	}
+	h := b.hl
+	h.manual, h.resolved = true, true
+	h.lexer = chroma.Coalesce(l)
+	h.lang = l.Config().Name
+	h.spans, h.version, h.windowed = nil, -1, false
+}

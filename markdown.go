@@ -116,6 +116,7 @@ type mdDoc struct {
 	blocks  []mdBlock // where each block starts, for source line mapping
 	links   []mdLink
 	anchors map[string]int
+	web     map[string]bool // web pages and images the document uses
 }
 
 type mdBlock struct{ y, line int }
@@ -216,6 +217,8 @@ func (a *App) toggleMarkdownPreview() {
 		b.vy = float32(line * a.ui.lineH)
 		a.follow = false
 	}
+	// free the layout, images and highlighting until the preview is back
+	md.doc, md.images, md.spans = nil, nil, nil
 }
 
 func (a *App) mdBodyPx(gtx layout.Context) int { return gtx.Sp(unit.Sp(a.fontSp + 1)) }
@@ -520,6 +523,7 @@ type mdLayout struct {
 	codePx     int
 	lineStarts []int
 	first      bool
+	trail      int // space the last block left below itself
 }
 
 func (a *App) layoutMarkdown(gtx layout.Context, b *Buffer, width, px int) *mdDoc {
@@ -527,7 +531,7 @@ func (a *App) layoutMarkdown(gtx layout.Context, b *Buffer, width, px int) *mdDo
 	p := goldmark.New(goldmark.WithExtensions(east.GFM)).Parser()
 	root := p.Parse(gtext.NewReader(src))
 	l := &mdLayout{a: a, gtx: gtx, th: a.th, src: src, md: b.md, px: px, first: true,
-		doc: &mdDoc{anchors: map[string]int{}}}
+		doc: &mdDoc{anchors: map[string]int{}, web: map[string]bool{}}}
 	l.codePx = max(8, px*86/100)
 	if b.path != "" {
 		l.dir = filepath.Dir(b.path)
@@ -551,6 +555,13 @@ func (l *mdLayout) dp(v float32) int {
 }
 
 func (l *mdLayout) lineH(px int) int { return px * 165 / 100 }
+
+// after adds the space a block leaves below itself, remembered so a
+// container (quote, list item) can take its last child's space back.
+func (l *mdLayout) after(v int) {
+	l.y += v
+	l.trail = v
+}
 
 func (l *mdLayout) add(it mdItem) { l.doc.items = append(l.doc.items, it) }
 
@@ -593,6 +604,7 @@ func (l *mdLayout) gap(v int) {
 
 func (l *mdLayout) block(n gast.Node, x, w int, fg color.NRGBA) {
 	th := l.th
+	l.trail = 0
 	switch n := n.(type) {
 	case *gast.Heading:
 		scale := []int{0, 200, 150, 125, 110, 100, 90}[min(n.Level, 6)]
@@ -619,29 +631,30 @@ func (l *mdLayout) block(n gast.Node, x, w int, fg color.NRGBA) {
 			l.add(mdItem{kind: miFill, r: image.Rect(x, l.y, x+w, l.y+max(1, l.dp(1))), col: th.border})
 			l.y += l.dp(4)
 		}
-		l.y += l.dp(10)
+		l.after(l.dp(10))
 	case *gast.Paragraph:
 		l.gap(0)
 		l.mark(n)
 		runs := l.inlines(n, mdStyle{col: fg})
 		if u := soleLink(runs); u != "" {
+			l.doc.web[u] = true
 			if c := l.a.linkCard(u); c != nil {
 				l.card(c, u, x, w)
 				break
 			}
 		}
 		l.y += l.flow(runs, x, w, l.px, l.lineH(l.px), 0)
-		l.y += l.dp(14)
+		l.after(l.dp(14))
 	case *gast.TextBlock:
 		l.mark(n)
 		l.y += l.flow(l.inlines(n, mdStyle{col: fg}), x, w, l.px, l.lineH(l.px), 0)
 		if n.NextSibling() != nil {
-			l.y += l.dp(6)
+			l.after(l.dp(6))
 		}
 	case *gast.ThematicBreak:
 		l.y += l.dp(10)
 		l.add(mdItem{kind: miFill, r: image.Rect(x, l.y, x+w, l.y+max(2, l.dp(2))), col: th.border, rad: 1})
-		l.y += l.dp(24)
+		l.after(l.dp(24))
 	case *gast.Blockquote:
 		y0 := l.y
 		inner := mixC(fg, th.bg, 0.25)
@@ -652,13 +665,13 @@ func (l *mdLayout) block(n gast.Node, x, w int, fg color.NRGBA) {
 			l.block(c, x+in, w-in, inner)
 			l.first = false
 		}
-		l.y -= l.dp(14) // the last paragraph's spacing belongs outside
+		l.y -= l.trail // the last block's spacing belongs outside
 		l.y = max(l.y, y0+l.lineH(l.px))
 		l.add(mdItem{kind: miFill, r: image.Rect(x, y0, x+bar, l.y), col: mixC(th.bg, th.fg, 0.2), rad: bar / 2})
-		l.y += l.dp(16)
+		l.after(l.dp(16))
 	case *gast.List:
 		l.list(n, x, w, fg, 0)
-		l.y += l.dp(10)
+		l.after(l.dp(10))
 	case *gast.FencedCodeBlock:
 		l.gap(0)
 		l.mark(n)
@@ -682,7 +695,7 @@ func (l *mdLayout) block(n gast.Node, x, w int, fg color.NRGBA) {
 		l.gap(0)
 		l.mark(n)
 		l.table(n, x, w, fg)
-		l.y += l.dp(16)
+		l.after(l.dp(16))
 	default:
 		for c := n.FirstChild(); c != nil; c = c.NextSibling() {
 			l.block(c, x, w, fg)
@@ -737,8 +750,8 @@ func (l *mdLayout) list(n *gast.List, x, w int, fg color.NRGBA, depth int) {
 			}
 			l.first = true
 			l.block(c, x+indent, w-indent, fg)
-			if _, ok := c.(*gast.Paragraph); ok && c.NextSibling() == nil {
-				l.y -= l.dp(14)
+			if c.NextSibling() == nil {
+				l.y -= l.trail // the item's last block: no gap before the next item
 			}
 		}
 		l.first = false
@@ -817,7 +830,8 @@ func (l *mdLayout) card(c *ogCard, u string, x, w int) {
 		l.add(mdItem{kind: miText, r: textAt(x+pad, y, y+dd), s: line, f: fUI, px: dpx, col: th.dim})
 	}
 	l.doc.links = append(l.doc.links, mdLink{box, u, true})
-	l.y += h + l.dp(16)
+	l.y += h
+	l.after(l.dp(16))
 }
 
 // wrapText breaks s into at most n lines of width w, ending with an ellipsis
@@ -935,7 +949,8 @@ func (l *mdLayout) code(n gast.Node, lang string, x, w int) {
 		}
 		y += lh
 	}
-	l.y += h + l.dp(16)
+	l.y += h
+	l.after(l.dp(16))
 }
 
 // html shows a raw HTML block as dim source; ted does not render HTML.
@@ -952,7 +967,7 @@ func (l *mdLayout) html(s string, x, w int, fg color.NRGBA) {
 		l.add(mdItem{kind: miText, r: textAt(x, bl, bl+desc), s: l.a.tc.truncate(fMono, px, w, line), f: fMono, px: px, col: l.th.faint})
 		l.y += lh
 	}
-	l.y += l.dp(12)
+	l.after(l.dp(12))
 }
 
 func (l *mdLayout) table(t *xast.Table, x, w int, fg color.NRGBA) {
@@ -1300,6 +1315,7 @@ func (l *mdLayout) putText(s string, st mdStyle, f face, px, x, baseline, lh, to
 // (again when they change), web images through the shared downloader.
 func (l *mdLayout) image(dest string) *mdImage {
 	if isWebURL(dest) {
+		l.doc.web[dest] = true
 		return l.a.webImageFor(dest)
 	}
 	if strings.Contains(dest, "://") || strings.HasPrefix(dest, "data:") || dest == "" {

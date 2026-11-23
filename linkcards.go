@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/net/html"
 )
@@ -18,6 +19,7 @@ import (
 
 type ogCard struct {
 	done  bool // finished loading, successfully or not
+	at    time.Time
 	ok    bool
 	title string
 	desc  string
@@ -27,8 +29,16 @@ type ogCard struct {
 
 type webImage struct {
 	done bool
+	at   time.Time
 	img  *mdImage
 }
+
+// A failed fetch is tried again after this long (the network may be back).
+const webRetry = 2 * time.Minute
+
+// Decoded web images are dropped, except those an open preview shows, once
+// they take more than this much memory.
+const webCacheBytes = 192 << 20
 
 var webClient = &http.Client{Timeout: 8 * time.Second}
 
@@ -47,7 +57,7 @@ func (a *App) linkCard(u string) *ogCard {
 	if a.og == nil {
 		a.og = map[string]*ogCard{}
 	}
-	if c, ok := a.og[u]; ok {
+	if c, ok := a.og[u]; ok && !(c.done && !c.ok && time.Since(c.at) > webRetry) {
 		if c.ok {
 			return c
 		}
@@ -59,7 +69,7 @@ func (a *App) linkCard(u string) *ogCard {
 		res := fetchCard(u)
 		a.post(func() {
 			*c = *res
-			c.done = true
+			c.done, c.at = true, time.Now()
 			a.webVer++
 		})
 	}()
@@ -75,7 +85,7 @@ func (a *App) webImageFor(u string) *mdImage {
 	if a.webImgs == nil {
 		a.webImgs = map[string]*webImage{}
 	}
-	if w, ok := a.webImgs[u]; ok {
+	if w, ok := a.webImgs[u]; ok && !(w.done && w.img == nil && time.Since(w.at) > webRetry) {
 		return w.img
 	}
 	w := &webImage{}
@@ -83,7 +93,7 @@ func (a *App) webImageFor(u string) *mdImage {
 	go func() {
 		img := fetchImage(u, 2400)
 		a.post(func() {
-			w.done, w.img = true, img
+			w.done, w.img, w.at = true, img, time.Now()
 			a.webVer++
 		})
 	}()
@@ -132,6 +142,7 @@ func fetchCard(u string) *ogCard {
 	if err != nil || (ctype != "" && !strings.Contains(ctype, "html")) {
 		return c
 	}
+	data = toUTF8(data, ctype)
 	meta := parseMeta(data)
 	c.title = firstNonEmpty(meta["og:title"], meta["twitter:title"], meta["title"])
 	c.desc = firstNonEmpty(meta["og:description"], meta["twitter:description"], meta["description"])
@@ -205,4 +216,80 @@ func firstNonEmpty(xs ...string) string {
 		}
 	}
 	return ""
+}
+
+// toUTF8 converts a page in Latin-1 or Windows-1252, the common legacy
+// encodings, to UTF-8. Other encodings are rare enough on today's web that
+// their tables are not worth the binary size; such titles stay as they are.
+func toUTF8(data []byte, ctype string) []byte {
+	if utf8.Valid(data) {
+		return data
+	}
+	cs := strings.ToLower(ctype)
+	if i := bytes.Index(bytes.ToLower(data[:min(len(data), 2048)]), []byte("charset=")); i >= 0 {
+		cs += " " + strings.ToLower(string(data[i:min(len(data), i+30)]))
+	}
+	latin := strings.Contains(cs, "1252") || strings.Contains(cs, "8859-1") || strings.Contains(cs, "latin1") || !strings.Contains(cs, "charset")
+	if !latin {
+		return data
+	}
+	var sb strings.Builder
+	sb.Grow(len(data) + len(data)/8)
+	for _, c := range data {
+		switch {
+		case c < 0x80:
+			sb.WriteByte(c)
+		case c < 0xA0 && cp1252[c-0x80] != 0:
+			sb.WriteRune(cp1252[c-0x80])
+		default:
+			sb.WriteRune(rune(c))
+		}
+	}
+	return []byte(sb.String())
+}
+
+// cp1252 maps Windows-1252's 0x80-0x9F range (quotes, dashes, euro) to Unicode.
+var cp1252 = [32]rune{
+	0x20AC, 0, 0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021, 0x02C6, 0x2030, 0x0160, 0x2039, 0x0152, 0, 0x017D, 0,
+	0, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2013, 0x2014, 0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0, 0x017E, 0x0178,
+}
+
+// trimWebCache frees decoded web images and cards once they use more than
+// webCacheBytes, keeping what open previews show. Called every second.
+func (a *App) trimWebCache() {
+	total := 0
+	for _, w := range a.webImgs {
+		total += imageBytes(w.img)
+	}
+	for _, c := range a.og {
+		total += imageBytes(c.img)
+	}
+	if total <= webCacheBytes {
+		return
+	}
+	inUse := map[string]bool{}
+	for _, b := range a.bufs {
+		if b.previewing() && b.md.doc != nil {
+			for u := range b.md.doc.web {
+				inUse[u] = true
+			}
+		}
+	}
+	for u, w := range a.webImgs {
+		if w.done && !inUse[u] {
+			delete(a.webImgs, u)
+		}
+	}
+	for u, c := range a.og {
+		if c.done && !inUse[u] {
+			delete(a.og, u)
+		}
+	}
+}
+
+func imageBytes(im *mdImage) int {
+	if im == nil {
+		return 0
+	}
+	return im.size.X * im.size.Y * 4
 }
