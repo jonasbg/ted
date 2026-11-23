@@ -175,6 +175,7 @@ type grepHit struct {
 	line int    // 1-based
 	col  int    // 1-based byte column
 	text string
+	buf  *Buffer // set when the hit is in an open tab (open-files scope)
 }
 
 const maxGrepHits = 2000
@@ -227,7 +228,7 @@ func rgGrep(ctx context.Context, root, query string) ([]grepHit, bool) {
 		}
 		ln, _ := strconv.Atoi(parts[0])
 		col, _ := strconv.Atoi(parts[1])
-		hits = append(hits, grepHit{strings.TrimPrefix(path, "./"), ln, col, parts[2]})
+		hits = append(hits, grepHit{path: strings.TrimPrefix(path, "./"), line: ln, col: col, text: parts[2]})
 		if len(hits) >= maxGrepHits {
 			truncated = true
 			break
@@ -278,10 +279,57 @@ func walkGrep(ctx context.Context, root, query string) ([]grepHit, bool) {
 				if len(t) > 400 {
 					t = t[:400]
 				}
-				hits = append(hits, grepHit{f, i + 1, c + 1, t})
+				hits = append(hits, grepHit{path: f, line: i + 1, col: c + 1, text: t})
 				if len(hits) >= maxGrepHits {
 					return hits, true
 				}
+			}
+		}
+	}
+	return hits, false
+}
+
+// bufferGrep searches the text of open buffers, as rgGrep does files:
+// fixed string, smart case, at most 200 hits per buffer.
+func bufferGrep(bufs []*Buffer, labels []string, query string) ([]grepHit, bool) {
+	if query == "" {
+		return nil, false
+	}
+	cs := smartCase(query)
+	q := query
+	if !cs {
+		q = strings.ToLower(q)
+	}
+	var hits []grepHit
+	for bi, b := range bufs {
+		n := 0
+		for i, l := range b.lines {
+			if len(l) < len(q)/utf8.UTFMax {
+				continue
+			}
+			line := string(l)
+			hay := line
+			if !cs {
+				hay = strings.ToLower(line)
+			}
+			c := strings.Index(hay, q)
+			if c < 0 {
+				continue
+			}
+			if len(hay) != len(line) {
+				// lower-casing changed byte lengths; locate the match by runes
+				c = len(string(l[:byteToRuneCol([]rune(hay), c)]))
+			}
+			t := line
+			if len(t) > 400 {
+				t = strings.ToValidUTF8(t[:400], "")
+			}
+			hits = append(hits, grepHit{path: labels[bi], line: i + 1, col: c + 1, text: t, buf: b})
+			if len(hits) >= maxGrepHits {
+				return hits, true
+			}
+			if n++; n >= 200 {
+				break
 			}
 		}
 	}

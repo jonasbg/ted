@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -235,56 +234,35 @@ func gitToplevel(dir string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// gitStatus returns a map of absolute path -> status, with directories
-// inheriting the "strongest" status of their contents.
-func gitStatus(root string) map[string]byte {
-	if root == "" {
-		return nil
+// recordTreeStatus propagates a file status to its parent directories.
+func recordTreeStatus(m map[string]byte, root string, c gitChange) {
+	x, y, p := c.x, c.y, c.path
+	var st byte
+	switch {
+	case x == '?' && y == '?':
+		st = '?'
+	case x == 'D' || y == 'D':
+		st = 'D'
+	case x == 'A':
+		st = 'A'
+	default:
+		st = 'M'
 	}
-	out, err := exec.Command("git", "-C", root, "status", "--porcelain=v1", "-z", "--ignore-submodules").Output()
-	if err != nil {
-		return nil
+	abs := filepath.Join(root, strings.TrimSuffix(p, "/"))
+	m[abs] = st
+	dirSt := byte('M')
+	if st == '?' || st == 'A' {
+		dirSt = '?'
 	}
-	m := map[string]byte{}
-	recs := bytes.Split(out, []byte{0})
-	for i := 0; i < len(recs); i++ {
-		r := recs[i]
-		if len(r) < 4 {
-			continue
+	for d := filepath.Dir(abs); len(d) >= len(root); d = filepath.Dir(d) {
+		if prev := m[d]; prev == 'M' || prev == dirSt {
+			break
 		}
-		x, y := r[0], r[1]
-		p := string(r[3:])
-		if x == 'R' || x == 'C' {
-			i++ // skip original path
-		}
-		var st byte
-		switch {
-		case x == '?' && y == '?':
-			st = '?'
-		case x == 'D' || y == 'D':
-			st = 'D'
-		case x == 'A':
-			st = 'A'
-		default:
-			st = 'M'
-		}
-		abs := filepath.Join(root, strings.TrimSuffix(p, "/"))
-		m[abs] = st
-		dirSt := byte('M')
-		if st == '?' || st == 'A' {
-			dirSt = '?'
-		}
-		for d := filepath.Dir(abs); len(d) >= len(root); d = filepath.Dir(d) {
-			if prev := m[d]; prev == 'M' || prev == dirSt {
-				break
-			}
-			m[d] = dirSt
-			if d == root || d == "/" {
-				break
-			}
+		m[d] = dirSt
+		if d == root || d == "/" {
+			break
 		}
 	}
-	return m
 }
 
 // gitStatusFor resolves a file's status, including when it lives inside an

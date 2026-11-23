@@ -127,8 +127,8 @@ func TestUIScreenshots(t *testing.T) {
 	h.settle()
 	h.shot("1-editor")
 
-	// quick open
-	h.keys(press("P", key.ModShortcut))
+	// Cmd+K: go to file
+	h.keys(press("K", key.ModShortcut))
 	h.typ("ovrl")
 	h.settle()
 	h.shot("2-quickopen")
@@ -150,16 +150,28 @@ func TestUIScreenshots(t *testing.T) {
 	}
 	h.keys(press(key.NameEscape))
 
-	// project search
-	h.keys(press("F", key.ModShortcut|key.ModShift))
+	// Cmd+K: text in the folder, then in the open tabs only
+	h.keys(press("K", key.ModShortcut))
 	h.typ("reloadFromDisk")
 	time.Sleep(400 * time.Millisecond)
 	h.settle()
 	h.shot("4-grep")
-	if o := h.a.overlay; o == nil || len(o.grepHits) == 0 {
-		t.Fatalf("grep found nothing")
+	o := h.a.overlay
+	if o == nil || o.scope != scopeFolder || len(o.grepHits) == 0 {
+		t.Fatalf("folder search found nothing")
 	}
-	h.keys(press(key.NameEscape))
+	h.keys(press(key.NameTab))
+	h.settle()
+	if o.scope != scopeOpen {
+		t.Fatalf("Tab did not switch to the open tabs")
+	}
+	for _, g := range o.grepHits {
+		if g.buf == nil {
+			t.Fatalf("open-tabs search returned a file hit: %+v", g)
+		}
+	}
+	h.shot("4b-grep-open")
+	h.keys(press(key.NameTab), press(key.NameEscape))
 	h.keys(press("F1"))
 	h.shot("5-help")
 }

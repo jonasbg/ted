@@ -68,12 +68,15 @@ type App struct {
 	mu      sync.Mutex
 	pending []any
 
-	files        []string
-	filesLoading bool
-	gitBusy      bool
-	branch       string
-	tickN        int
-	sessionSig   string
+	files          []string
+	filesLoading   bool
+	searchScope    searchScope // Cmd+K scope last chosen with Tab
+	lastGitRefresh time.Time
+	gitBusy        bool
+	gitAgain       bool // a refresh was asked for while one ran; rerun when it lands
+	branch         string
+	tickN          int
+	sessionSig     string
 
 	lineCopy    string
 	pasteTarget focusArea
@@ -469,11 +472,24 @@ func (a *App) loadFiles() {
 	}()
 }
 
+func (a *App) gitPollInterval() time.Duration {
+	if a.focused && a.showSidebar && (a.sideView == sideChanges || a.sideView == sideHistory) {
+		return 2 * time.Second
+	}
+	return 15 * time.Second
+}
+
 func (a *App) refreshGit() {
-	if a.tree.gitRoot == "" || a.gitBusy {
+	if a.tree.gitRoot == "" {
+		return
+	}
+	if a.gitBusy {
+		// The running snapshot may predate the change that asked for this one.
+		a.gitAgain = true
 		return
 	}
 	a.gitBusy = true
+	a.lastGitRefresh = time.Now()
 	root := a.tree.gitRoot
 	prev := a.scm.head
 	wantLog := !a.scm.logLoaded && a.sideView == sideHistory
@@ -542,7 +558,7 @@ func (a *App) drainPending() {
 		case filesEvent:
 			a.filesLoading = false
 			a.files = d.files
-			if o := a.overlay; o != nil && o.kind == ovQuick {
+			if o := a.overlay; o != nil && o.kind == ovSearch && o.scope == scopeFolder {
 				o.updateQuick(a)
 			}
 		case gitEvent:
@@ -550,12 +566,18 @@ func (a *App) drainPending() {
 			a.tree.git = d.s.status
 			a.branch = d.s.branch
 			a.applyGit(d.s)
+			if a.gitAgain {
+				a.gitAgain = false
+				a.refreshGit()
+			}
 		case grepEvent:
-			if o := a.overlay; o != nil && o.kind == ovGrep && o.gen == d.gen {
+			if o := a.overlay; o != nil && o.kind == ovSearch && o.gen == d.gen {
 				o.grepHits = d.hits
 				o.truncated = d.truncated
 				o.busy = false
-				o.sel, o.scroll = 0, 0
+				if o.sel >= len(o.quickHits) {
+					o.sel, o.scroll = 0, 0
+				}
 			}
 		case openEvent:
 			for _, t := range d.targets {
@@ -577,6 +599,8 @@ func (a *App) drainPending() {
 			a.checkOmarchyTheme()
 			if a.tickN%2 == 0 {
 				a.tree.refresh()
+			}
+			if time.Since(a.lastGitRefresh) >= a.gitPollInterval() {
 				a.refreshGit()
 			}
 			if a.tickN%3 == 0 {

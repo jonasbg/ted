@@ -112,7 +112,7 @@ func (a *App) showSideView(v int) {
 	a.sideView = v
 	a.showSidebar = true
 	a.focus = focusTree
-	if v == sideHistory && !a.scm.logLoaded {
+	if v == sideChanges || v == sideHistory {
 		a.refreshGit()
 	}
 }

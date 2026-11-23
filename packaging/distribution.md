@@ -12,9 +12,16 @@ sudo bash enable-repo
 On Apple Silicon or Intel macOS and x86_64 Linux:
 
 ```sh
-brew tap jonasbg/omarchy https://github.com/jonasbg/omarchy
-brew install jonasbg/omarchy/ted
+brew install jonasbg/tap/ted
 ted --version
 ```
 
 The macOS formula also includes a native app at `$(brew --prefix ted)/ted.app`.
+The formula lives in [jonasbg/homebrew-tap](https://github.com/jonasbg/homebrew-tap);
+this repository hosts the archives it downloads. If you installed from the
+old `jonasbg/omarchy` tap, switch with:
+
+```sh
+brew uninstall ted && brew untap jonasbg/omarchy
+brew install jonasbg/tap/ted
+```
