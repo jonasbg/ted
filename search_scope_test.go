@@ -6,7 +6,9 @@ import (
 	"testing"
 	"time"
 
+	"gioui.org/f32"
 	"gioui.org/io/key"
+	"gioui.org/io/pointer"
 )
 
 func TestBufferGrep(t *testing.T) {
@@ -120,6 +122,22 @@ func TestSettingsPage(t *testing.T) {
 	h.click(r.Min.X+r.Dx()/2, r.Min.Y+r.Dy()/2)
 	if !h.a.noWeb {
 		t.Fatal("web content switch did not turn off")
+	}
+	if isMac {
+		// 6 is Make default: never click it here, it changes this machine's defaults
+		h.settle()
+		r = o.btns[7]
+		h.click(r.Min.X+r.Dx()/2, r.Min.Y+r.Dy()/2)
+		if !o.showTypes {
+			t.Fatal("Show types did not open the list")
+		}
+		h.settle()
+		h.shot("7-settings-types")
+		// a page taller than the window scrolls
+		pos := f32.Pt(float32(o.box.Min.X+40), float32(o.box.Min.Y+40))
+		h.r.Queue(pointer.Event{Kind: pointer.Scroll, Source: pointer.Mouse, Position: pos, Scroll: f32.Pt(0, 2000)})
+		h.settle()
+		h.shot("7-settings-types-scrolled")
 	}
 	h.keys(press(key.NameEscape))
 	if h.a.overlay != nil {

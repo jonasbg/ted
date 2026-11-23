@@ -69,8 +69,9 @@ there instead of starting another window.
 
 Press **Cmd/Ctrl+,** or click the sliders at the bottom of the activity bar to
 open Settings. It shows the version and sets the font size and dotfiles, and
-the default app: on macOS whether HTML files open in Ted, on Linux **Make
-default** to open text and code files in Ted.
+the default app: **Make default** opens text and code files in Ted (on macOS
+**Show types** lists every ending it covers), and on macOS a switch says
+whether HTML files open in Ted.
 
 Press **F1** for all shortcuts.
 
@@ -130,9 +131,16 @@ Optional: `ripgrep` for faster, .gitignore-aware search.
 ### Default app (macOS)
 
 `ted.app` registers as the handler for plain text, CSV and most source
-file types, so double-clicking them opens ted. HTML is deliberately left to
+file types, so double-clicking them opens ted. It also declares types for
+endings macOS doesn't know (`.go`, `.rs`, `.toml`, `.dockerfile`, `.csproj`
+and more) and appears in *Open With* for files with no ending, such as
+`Dockerfile`, `LICENSE` and `.gitignore`. HTML is deliberately left to
 your browser: ted appears in *Open With* for `.html` without claiming the
 default.
+
+Another editor installed earlier may still be the default for some of
+these. **Make default** in Settings makes ted the default for all of them,
+including files with no ending, and leaves HTML alone.
 
 Files opened from Finder, the Dock or *Open With* go to an open project
 window that contains them, else to the window without a project folder,
