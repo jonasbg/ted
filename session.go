@@ -22,6 +22,7 @@ type sessionTab struct {
 	Vy      float32 `json:"vy"`
 	Unsaved *string `json:"unsaved,omitempty"`
 	Preview bool    `json:"preview,omitempty"`
+	Md      bool    `json:"md_preview,omitempty"`
 	DiskMod int64   `json:"disk_mod,omitempty"`
 }
 
@@ -32,6 +33,7 @@ type sessionFile struct {
 	Width   float32      `json:"sidebar_width"`
 	Font    float32      `json:"font"`
 	Dotfile bool         `json:"dotfiles,omitempty"`
+	NoWeb   bool         `json:"no_web,omitempty"`
 	Tabs    []sessionTab `json:"tabs"`
 }
 
@@ -54,9 +56,9 @@ func sessionPath(root string) string {
 
 func (a *App) sessionSignature() string {
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "%d|%v|%v|%v|", a.active, a.showSidebar, a.fontSp, a.tree.showHidden)
+	fmt.Fprintf(&sb, "%d|%v|%v|%v|%v|", a.active, a.showSidebar, a.fontSp, a.tree.showHidden, a.noWeb)
 	for _, b := range a.bufs {
-		fmt.Fprintf(&sb, "%s:%d:%v:%d;", b.path, b.cur.L, b.dirty(), b.version)
+		fmt.Fprintf(&sb, "%s:%d:%v:%d:%v;", b.path, b.cur.L, b.dirty(), b.version, b.previewing())
 	}
 	return sb.String()
 }
@@ -96,9 +98,9 @@ func (a *App) saveSession() {
 func (a *App) sessionSnapshot() (uint64, sessionFile) {
 	a.sessionSig = a.sessionSignature()
 	a.sessionSeq++
-	s := sessionFile{Root: a.root, Active: a.active, Sidebar: a.showSidebar, Width: a.sidebarDp, Font: a.fontSp, Dotfile: a.tree.showHidden}
+	s := sessionFile{Root: a.root, Active: a.active, Sidebar: a.showSidebar, Width: a.sidebarDp, Font: a.fontSp, Dotfile: a.tree.showHidden, NoWeb: a.noWeb}
 	for _, b := range a.bufs {
-		t := sessionTab{Path: b.path, Line: b.cur.L + 1, Col: b.cur.C + 1, Vy: b.vy, Preview: b.preview}
+		t := sessionTab{Path: b.path, Line: b.cur.L + 1, Col: b.cur.C + 1, Vy: b.vy, Preview: b.preview, Md: b.previewing()}
 		if b.dirty() {
 			txt := b.text()
 			t.Unsaved = &txt
@@ -149,6 +151,7 @@ func (a *App) restoreSession(root string, unsavedOnly bool) {
 	if s.Font > 0 {
 		a.fontSp = s.Font
 	}
+	a.noWeb = s.NoWeb
 	if s.Dotfile && !a.tree.showHidden {
 		a.setDotfiles(true)
 	}
@@ -189,6 +192,9 @@ func (a *App) restoreSession(root string, unsavedOnly bool) {
 		b.cur = b.clamp(Pos{t.Line - 1, t.Col - 1})
 		b.selecting = false
 		b.vy = t.Vy
+		if t.Md && isMarkdown(b) {
+			b.md = &mdState{on: true, hoverLink: -1, sync: t.Line - 1}
+		}
 	}
 	if active >= 0 {
 		a.active = active

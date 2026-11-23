@@ -246,7 +246,7 @@ func (a *App) drawEditor(gtx layout.Context, b *Buffer) {
 	if minimap {
 		a.drawMinimap(gtx, b, maxVy)
 	} else {
-		a.drawScrollbar(gtx, b, maxVy)
+		a.drawScrollbar(gtx, &b.vy, maxVy)
 	}
 	a.scheduleHighlight(b, visible)
 
@@ -344,7 +344,7 @@ func (a *App) drawLineText(gtx layout.Context, b *Buffer, li int, line []rune, b
 	flush()
 }
 
-func (a *App) drawScrollbar(gtx layout.Context, b *Buffer, maxVy float32) {
+func (a *App) drawScrollbar(gtx layout.Context, vy *float32, maxVy float32) {
 	ops := gtx.Ops
 	u := &a.ui
 	r := u.editor
@@ -357,7 +357,7 @@ func (a *App) drawScrollbar(gtx layout.Context, b *Buffer, maxVy float32) {
 	trackW := gtx.Dp(12)
 	track := image.Rect(r.Max.X-trackW, r.Min.Y, r.Max.X, r.Max.Y)
 	thumbH := max(float32(gtx.Dp(28)), viewH*viewH/contentH)
-	ty := float32(r.Min.Y) + b.vy/maxVy*(viewH-thumbH)
+	ty := float32(r.Min.Y) + *vy/maxVy*(viewH-thumbH)
 
 	for {
 		ev, ok := gtx.Event(pointer.Filter{Target: &u.thumbTag, Kinds: pointer.Press | pointer.Drag | pointer.Release | pointer.Enter | pointer.Leave})
@@ -381,8 +381,8 @@ func (a *App) drawScrollbar(gtx layout.Context, b *Buffer, maxVy float32) {
 		case pointer.Drag:
 			if u.dragThumb {
 				p := (e.Position.Y - u.dragThumbOff - float32(r.Min.Y)) / (viewH - thumbH)
-				b.vy = max(0, min(maxVy, p*maxVy))
-				ty = float32(r.Min.Y) + b.vy/maxVy*(viewH-thumbH)
+				*vy = max(0, min(maxVy, p*maxVy))
+				ty = float32(r.Min.Y) + *vy/maxVy*(viewH-thumbH)
 			}
 		case pointer.Release:
 			u.dragThumb = false
@@ -567,7 +567,7 @@ func (a *App) editorDrag(b *Buffer) {
 // input methods, dead keys and accent menus work.
 func (a *App) reportIME(gtx layout.Context) {
 	b := a.buf()
-	if b == nil || a.overlay != nil || a.focus != focusEditor {
+	if b == nil || a.overlay != nil || a.focus != focusEditor || b.previewing() || b.image != nil {
 		return
 	}
 	anc := b.cur

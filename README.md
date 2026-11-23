@@ -41,6 +41,17 @@ there instead of starting another window.
   The status bar shows count, sum and average of the selected cells (click
   it for min and max). Cmd/Ctrl+C copies a cell block as tab-separated rows,
   ready to paste into a spreadsheet.
+- Markdown preview (Cmd/Ctrl+Shift+V, or "Preview" in the status bar),
+  drawn natively: headings, emphasis, tables with column alignment, task
+  lists, quotes, highlighted code blocks and local images. Links open in the
+  browser, `#anchors` scroll, and relative `.md` links open in ted. Double-click
+  the preview to jump to that place in the source; Esc goes back. Mermaid
+  blocks are shown as source. A web link on a line of its own becomes a card
+  with the page's title, description and image (Open Graph), and remote
+  images load too; Settings turns both off, since they contact those sites.
+- Images (PNG, JPEG, GIF, WebP) open in a tab, fitted to the window over a
+  checkerboard, with size and dimensions in the status bar. They reload when
+  the file changes, so you can watch images an agent or script writes.
 - Search: find and replace, and Cmd/Ctrl+K, one box that fuzzy-matches file
   names (accepts path:line) and lists text matches below them. Tab switches
   it between the open folder (ripgrep when available) and the open tabs,

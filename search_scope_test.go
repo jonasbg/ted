@@ -115,6 +115,12 @@ func TestSettingsPage(t *testing.T) {
 	if !h.a.tree.showHidden {
 		t.Fatal("dotfiles switch did not turn on")
 	}
+	h.settle()
+	r = o.btns[5] // link cards and web images
+	h.click(r.Min.X+r.Dx()/2, r.Min.Y+r.Dy()/2)
+	if !h.a.noWeb {
+		t.Fatal("web content switch did not turn off")
+	}
 	h.keys(press(key.NameEscape))
 	if h.a.overlay != nil {
 		t.Fatal("Esc did not close settings")

@@ -115,7 +115,13 @@ func (a *App) layout(gtx layout.Context) {
 	u.editor = image.Rect(ex, titleH+tabsH, W, H-statusH)
 
 	if b := a.buf(); b != nil {
-		a.drawEditor(gtx, b)
+		if b.image != nil {
+			a.drawImageView(gtx, b)
+		} else if b.previewing() {
+			a.drawMarkdown(gtx, b)
+		} else {
+			a.drawEditor(gtx, b)
+		}
 		a.drawTabs(gtx)
 	} else {
 		a.drawWelcome(gtx, image.Rect(ex, titleH, W, H-statusH))
@@ -131,6 +137,9 @@ func (a *App) layout(gtx layout.Context) {
 		a.drawSidebar(gtx)
 	}
 	a.drawStatus(gtx)
+	if b := a.buf(); a.find != nil && b != nil && (b.previewing() || b.image != nil) {
+		a.closeFind() // e.g. switched to a preview or image tab
+	}
 	if a.find != nil && a.buf() != nil {
 		a.drawFindBar(gtx)
 	}
@@ -140,7 +149,7 @@ func (a *App) layout(gtx layout.Context) {
 	a.reportIME(gtx)
 
 	// caret blink
-	if a.focused && a.focus == focusEditor && a.overlay == nil && a.buf() != nil {
+	if b := a.buf(); a.focused && a.focus == focusEditor && a.overlay == nil && b != nil && !b.previewing() && b.image == nil {
 		const period = 530 * time.Millisecond
 		el := gtx.Now.Sub(a.blinkStart)
 		next := a.blinkStart.Add((el/period + 1) * period)
@@ -370,6 +379,20 @@ func (a *App) drawStatus(gtx layout.Context) {
 			}
 			right = append([]string{item}, right...)
 			ids = append([]string{"csv"}, ids...)
+		}
+		if iv := b.image; iv != nil {
+			right, ids = []string{iv.format, humanSize(b.size)}, []string{"imgfmt", "imgsize"}
+			if iv.img != nil {
+				right = append([]string{fmt.Sprintf("%d × %d", iv.orig.X, iv.orig.Y)}, right...)
+				ids = append([]string{"imgdim"}, ids...)
+			}
+		}
+		if b.previewing() {
+			// the source's controls (indentation, line endings) would edit it
+			right, ids = []string{"Source", lang}, []string{"md", "lang"}
+		} else if isMarkdown(b) {
+			right = append([]string{"Preview"}, right...)
+			ids = append([]string{"md"}, ids...)
 		}
 	}
 	for {

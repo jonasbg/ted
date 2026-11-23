@@ -72,6 +72,12 @@ func (a *App) onKey(gtx layout.Context, e key.Event) {
 				a.openSettings()
 			}
 			return
+		case "V":
+			if shift && a.overlay == nil && isMarkdown(a.buf()) {
+				a.toggleMarkdownPreview()
+				return
+			}
+			// elsewhere Cmd/Ctrl+Shift+V pastes, as before
 		case "K":
 			if !shift {
 				q := ""
@@ -184,6 +190,14 @@ func (a *App) onKey(gtx layout.Context, e key.Event) {
 		}
 		a.treeKey(gtx, e)
 		return
+	}
+	if b.image != nil {
+		return // nothing to edit in an image
+	}
+	if b.previewing() && a.focus != focusFind {
+		if a.mdKeyPress(b, e) {
+			return
+		}
 	}
 	// Find bar and editor share these.
 	switch {
@@ -502,7 +516,7 @@ func (a *App) onPaste(s string) {
 		return
 	}
 	b := a.buf()
-	if b == nil || s == "" {
+	if b == nil || s == "" || b.previewing() {
 		return
 	}
 	if b.clearBlock() {
@@ -541,6 +555,9 @@ func (a *App) onEdit(e key.EditEvent) {
 				a.treeChar(r)
 			}
 		}
+		return
+	}
+	if b.previewing() {
 		return
 	}
 	if b.readOnly {

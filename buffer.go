@@ -92,7 +92,9 @@ type Buffer struct {
 
 	version int // bumped on every change; used by the highlighter
 	hl      *highlightState
-	csv     *csvState // set for delimited files (rainbow columns)
+	csv     *csvState  // set for delimited files (rainbow columns)
+	md      *mdState   // Markdown preview, once opened
+	image   *imageView // set for image files, shown instead of text
 }
 
 func newBuffer(path string) *Buffer {
