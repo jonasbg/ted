@@ -60,11 +60,12 @@ func (h *highlightState) lineSpans(li int) []span {
 
 // Theme holds the UI colours, derived from a chroma style.
 type Theme struct {
-	name  string
-	light bool
-	cs    *chroma.Style
-	mu    sync.Mutex
-	cache map[chroma.TokenType]tokStyle
+	rainbowCols []color.NRGBA // per-column CSV colours, derived lazily
+	name        string
+	light       bool
+	cs          *chroma.Style
+	mu          sync.Mutex
+	cache       map[chroma.TokenType]tokStyle
 
 	bg, fg, dim, faint       color.NRGBA
 	curLine, selection       color.NRGBA
@@ -252,6 +253,10 @@ func (b *Buffer) resolveLexer() {
 	sample := ""
 	for i := 0; i < len(b.lines) && i < 40; i++ {
 		sample += string(b.lines[i]) + "\n"
+	}
+	if d := csvDelimFor(b.path, sample); d != 0 {
+		b.setCSV(d)
+		return
 	}
 	h.lexer = lexerFor(b.path, sample)
 	if h.lexer != nil {

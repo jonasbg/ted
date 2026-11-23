@@ -1,10 +1,10 @@
 pkgname=ted
-pkgver=0.2.1
+pkgver=0.2.4
 pkgrel=1
 pkgdesc="Native code editor for the terminal and desktop"
 arch=(x86_64)
 url="https://github.com/jonasbg/omarchy"
-depends=(glibc libglvnd libx11 libxcursor libxfixes libxkbcommon-x11 wayland)
+depends=(glib2 glibc libglvnd libx11 libxcursor libxfixes libxkbcommon-x11 wayland)
 makedepends=(go pkgconf)
 options=(!debug)
 source=("ted-$pkgver.tar.gz")

@@ -109,28 +109,66 @@ func mustHex(s string) color.NRGBA { c, _ := parseHex(s); return c }
 
 func chromaKeyword() chroma.TokenType { return chroma.Keyword }
 
-func TestLauncherStartReopensLastProject(t *testing.T) {
-	home := t.TempDir()
-	if r, err := filepath.EvalSymlinks(home); err == nil {
-		home = r
+func TestOnlyExplicitFoldersOpenAProject(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	for _, args := range [][]string{nil, {"file.go"}} {
+		root, _ := resolveArgs(args)
+		if root != "" {
+			t.Fatalf("args %v opened folder %q", args, root)
+		}
 	}
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
-	proj := filepath.Join(home, "code", "proj")
-	os.MkdirAll(proj, 0o755)
-	os.MkdirAll(cacheDir(), 0o700)
-	os.WriteFile(lastRootFile(), []byte(proj+"\n"), 0o600)
-	t.Chdir(home) // launchers start apps in the home folder
-	if root, _ := resolveArgs(nil, false); root != home {
-		t.Fatalf("terminal opened %q, want home", root)
+	root, _ := resolveArgs([]string{"."})
+	want, _ := filepath.EvalSymlinks(dir)
+	if root != want {
+		t.Fatalf("explicit folder: got %q, want %q", root, want)
 	}
-	root, files := resolveArgs(nil, true)
-	if root != proj || len(files) != 0 {
-		t.Fatalf("root=%q files=%v, want last project %q", root, files, proj)
+}
+
+func TestRestoreDraftWithoutProject(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	project := newApp(nil, dir, newTheme("github"), defaultFontSp)
+	path := filepath.Join(dir, "saved.txt")
+	if err := os.WriteFile(path, []byte("on disk"), 0600); err != nil {
+		t.Fatal(err)
 	}
-	// with no remembered project, fall back to home rather than /
-	os.Remove(lastRootFile())
-	if root, _ := resolveArgs(nil, true); root != home {
-		t.Fatalf("root=%q, want home", root)
+	if !project.openFile(path, 0, 0) {
+		t.Fatal("open saved file")
+	}
+	project.newUntitled()
+	project.buf().replaceRange(Pos{}, Pos{}, []rune("unfinished"))
+	project.saveSession()
+	standalone := newApp(nil, "", project.th, defaultFontSp)
+	standalone.restoreSession(dir, true)
+	standalone.loadFiles()
+	if len(standalone.bufs) != 1 || standalone.buf().text() != "unfinished" || !standalone.buf().dirty() ||
+		standalone.showSidebar || standalone.filesLoading || standalone.tree.gitRoot != "" || standalone.tree.root.loaded {
+		t.Fatal("expected only the draft and no open project")
+	}
+}
+
+func TestDiscardLastDraft(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	a := newApp(nil, "", newTheme("github"), defaultFontSp)
+	a.newUntitled()
+	a.buf().replaceRange(Pos{}, Pos{}, []rune("draft"))
+	a.saveSession()
+	a.requestClose(a.active)
+	a.overlayText("c")
+	if a.buf() == nil || a.buf().text() != "draft" {
+		t.Fatal("cancel lost the draft")
+	}
+	a.requestClose(a.active)
+	a.overlayText("d")
+	if len(a.bufs) != 0 {
+		t.Fatal("discard left a tab open")
+	}
+	reopened := newApp(nil, "", a.th, defaultFontSp)
+	reopened.restoreSession("", true)
+	if len(reopened.bufs) != 0 {
+		t.Fatal("discarded draft was restored")
 	}
 }

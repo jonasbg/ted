@@ -19,6 +19,12 @@ func (a *App) statusClick(id string) {
 	switch id {
 	case "pos":
 		a.gotoLinePrompt()
+	case "csv":
+		if st, ok := b.selectionStats(); ok {
+			a.setMsg("%s", st.detail())
+		} else {
+			a.setMsg("Alt+drag selects cells, Alt+click a header selects its column; the status bar sums them")
+		}
 	case "enc":
 		a.setMsg("ted reads and writes UTF-8")
 	case "eol":
@@ -66,11 +72,14 @@ func (a *App) statusClick(id string) {
 				names = append(names, n)
 			}
 		}
-		names = append([]string{"Plain Text"}, names...)
-		sort.SliceStable(names[1:], func(i, j int) bool {
-			return strings.ToLower(names[1+i]) < strings.ToLower(names[1+j])
+		names = append([]string{"Plain Text", "Rainbow CSV"}, names...)
+		sort.SliceStable(names[2:], func(i, j int) bool {
+			return strings.ToLower(names[2+i]) < strings.ToLower(names[2+j])
 		})
 		cur := b.hl.lang
+		if b.csv != nil {
+			cur = "Rainbow CSV"
+		}
 		if cur == "" {
 			cur = "Plain Text"
 		}
@@ -78,6 +87,15 @@ func (a *App) statusClick(id string) {
 			h := b.hl
 			h.manual, h.resolved = true, true
 			h.lexer, h.lang, h.spans = nil, "", nil
+			b.csv = nil
+			if s == "Rainbow CSV" {
+				sample := ""
+				for i := 0; i < len(b.lines) && i < 10; i++ {
+					sample += string(b.lines[i]) + "\n"
+				}
+				b.setCSV(sniffDelim(sample))
+				return
+			}
 			if s != "Plain Text" {
 				if l := lexers.Get(s); l != nil {
 					h.lexer = chroma.Coalesce(l)

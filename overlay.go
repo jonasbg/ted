@@ -232,6 +232,10 @@ func (a *App) openQuick() {
 }
 
 func (a *App) openGrep(initial string) {
+	if a.root == "" {
+		a.setMsg("Open a folder with ted <folder> to search the project")
+		return
+	}
 	a.closeOverlay()
 	a.overlay = &Overlay{hover: -1, hoverBtn: -1, kind: ovGrep}
 	a.overlay.in.set(initial)
@@ -539,6 +543,9 @@ func (a *App) drawOverlay(gtx layout.Context) {
 		strokeRRect(ops, o.box, rad, 1, th.border)
 		px := gtx.Sp(14)
 		a.tc.draw(ops, fUIBold, px, bx+gtx.Dp(20), by+gtx.Dp(36), a.tc.truncate(fUIBold, px, bw-gtx.Dp(40), o.message), th.fg)
+		if o.title != "" {
+			a.tc.draw(ops, fUI, a.ui.uiPx, bx+gtx.Dp(20), by+gtx.Dp(61), o.title, th.dim)
+		}
 		x := o.box.Max.X - gtx.Dp(16)
 		bhh := gtx.Dp(30)
 		for i := len(o.buttons) - 1; i >= 0; i-- {
@@ -1092,6 +1099,12 @@ func helpRows() [][2]string {
 		{"Alt+Shift+Up / Down", "Duplicate line"},
 		{word + "+Left / Right", "Move by word"},
 		{word + "+Backspace", "Delete word"},
+		{"CSV / TSV files", ""},
+		{"Alt+click / drag", "Select cells (status bar shows count, sum, average)"},
+		{"Alt+click header", "Select the whole column (drag for more columns)"},
+		{"Alt+Shift+click", "Extend the cell selection"},
+		{"Click line numbers", "Select rows"},
+		{c + "+C", "Copy selected cells as tab-separated rows"},
 		{"View", ""},
 		{c + "+B", "Toggle the side panel"},
 		{c + "+Shift+E", "Files"},

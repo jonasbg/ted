@@ -1,14 +1,15 @@
 # ted
 
 A fast, native code editor you open from the terminal. `ted path` opens a
-window with the file and its project tree, then returns your prompt
+window with the requested file or folder, then returns your prompt
 immediately. It's one Go binary with GPU rendering through Gio. There is no
 Electron, no webview and no extension host.
 
 ```
-ted                 # current folder
+ted                 # restore unsaved tabs, or show the welcome screen
+ted .               # current folder
 ted src/            # a folder
-ted main.go         # a file; the tree shows its git project
+ted main.go         # a file without a folder tree
 ted main.go:42      # jump to a line (paste file:line straight from tool output)
 ted a.go b.go       # several files as tabs
 git config core.editor "ted -w"   # block until the window closes
@@ -34,6 +35,12 @@ there instead of starting another window.
   bracket and quote pairing, bracket matching, indent guides, comment toggle,
   moving and duplicating lines, and selecting the next occurrence. Input
   methods and dead keys work through the platform text-input system.
+- CSV and TSV files get rainbow columns, with the delimiter sniffed from the
+  file (`,` `;` tab `|`). Alt+drag selects a block of cells, Alt+click on a
+  header selects the whole column, and clicking line numbers selects rows.
+  The status bar shows count, sum and average of the selected cells (click
+  it for min and max). Cmd/Ctrl+C copies a cell block as tab-separated rows,
+  ready to paste into a spreadsheet.
 - Search: find and replace, fuzzy *go to file* (Cmd/Ctrl+P), and project-wide
   search (Cmd/Ctrl+Shift+F) that uses ripgrep when available.
 - Files changed on disk, for example by an AI agent, git or a formatter,
@@ -46,6 +53,9 @@ there instead of starting another window.
 - On macOS, the title bar is hidden in the Ghostty style: the traffic lights
   float over a top bar that uses the theme's background colour. Drag the
   window by empty space in that bar.
+
+On Linux, click the sliders at the bottom of the sidebar or press **Ctrl+,**
+to open Settings. Choose **Make default** to open text and code files in Ted.
 
 Press **F1** for all shortcuts.
 
@@ -74,8 +84,7 @@ make install PREFIX=/usr/local
 
 On macOS, `ted.app` goes into `~/Applications`, so ted is in Spotlight,
 Launchpad and Raycast. On Linux, the desktop entry and icon make it show up
-in your app launcher. Started from a launcher without a file, ted reopens
-your last project.
+in your app launcher. Started from a launcher without a file, ted restores unsaved work without opening a folder.
 
 Linux also needs the Wayland/X11 development packages. On Debian or Ubuntu:
 
@@ -86,6 +95,23 @@ sudo apt install gcc pkg-config libwayland-dev libx11-dev libx11-xcb-dev \
 ```
 
 Optional: `ripgrep` for faster, .gitignore-aware search.
+
+### Default app (macOS)
+
+`ted.app` registers as the handler for plain text, CSV and most source
+file types, so double-clicking them opens ted. HTML is deliberately left to
+your browser: ted appears in *Open With* for `.html` without claiming the
+default.
+
+Files opened from Finder, the Dock or *Open With* go to an open project
+window that contains them, else to the window without a project folder,
+which is created if needed. Folders dropped on the Dock icon open as
+projects. To make `.html` open in ted on this machine:
+
+```sh
+ted --set-html-default      # .html opens in ted
+ted --unset-html-default    # back to Safari
+```
 
 ## Options
 

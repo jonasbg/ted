@@ -65,6 +65,11 @@ func (a *App) onKey(gtx layout.Context, e key.Event) {
 	// Global shortcuts.
 	if sc {
 		switch e.Name {
+		case ",":
+			if runtime.GOOS == "linux" {
+				a.openSettings()
+				return
+			}
 		case "P":
 			if !shift {
 				a.openQuick()
@@ -108,6 +113,9 @@ func (a *App) onKey(gtx layout.Context, e key.Event) {
 			})
 			return
 		case "B":
+			if a.root == "" {
+				return
+			}
 			a.showSidebar = !a.showSidebar
 			if !a.showSidebar && a.focus == focusTree {
 				a.focus = focusEditor
@@ -244,6 +252,25 @@ func (a *App) editorKey(gtx layout.Context, b *Buffer, e key.Event) {
 	shift := m.Contain(key.ModShift)
 	alt := m.Contain(key.ModAlt)
 	word := m.Contain(key.ModShortcutAlt) // Alt on macOS, Ctrl elsewhere
+	if b.csv != nil && b.csv.block != nil {
+		switch {
+		case sc && (e.Name == "C" || e.Name == "X"):
+			// copy the cells as tab-separated rows (never cut: that would
+			// leave ragged rows)
+			gtx.Execute(clipboard.WriteCmd{Type: "application/text", Data: io.NopCloser(strings.NewReader(b.blockText()))})
+			a.lineCopy = ""
+			st, _ := b.selectionStats()
+			a.setMsg("Copied %s", st.detail())
+			return
+		case e.Name == key.NameEscape:
+			b.clearBlock()
+			return
+		case e.Name == key.NameShift || e.Name == key.NameAlt || e.Name == key.NameCommand || e.Name == key.NameCtrl:
+			// a bare modifier
+		default:
+			b.clearBlock()
+		}
+	}
 	a.follow = true
 	vertical := false
 
@@ -481,6 +508,9 @@ func (a *App) onPaste(s string) {
 	if b == nil || s == "" {
 		return
 	}
+	if b.clearBlock() {
+		a.setMsg("Cell selection cleared; paste goes at the caret")
+	}
 	b.breakUndo()
 	if s == a.lineCopy && !b.hasSel() {
 		col := b.cur.C
@@ -522,6 +552,7 @@ func (a *App) onEdit(e key.EditEvent) {
 	}
 	a.follow = true
 	b.wantCol = -1
+	b.clearBlock()
 	lo, hi := e.Range.Start, e.Range.End
 	if lo > hi {
 		lo, hi = hi, lo

@@ -27,6 +27,7 @@ print('''  on_linux do
     depends_on "libxcursor"
     depends_on "libxkbcommon"
     depends_on "mesa"
+    depends_on "glib"
     depends_on "patchelf" => :build
     depends_on "wayland"
   end
@@ -46,6 +47,8 @@ print('''  on_linux do
       bin.install "ted"
       system "patchelf", "--set-rpath", HOMEBREW_PREFIX/"lib", bin/"ted"
       (share/"icons/hicolor/256x256/apps").install "ted.png"
+      inreplace "ted.desktop", "@BIN@", (opt_bin/"ted").to_s
+      (share/"applications").install "ted.desktop"
     end
   end
 

@@ -1,4 +1,6 @@
-// mkicon renders the golden Ted monogram at desktop and launcher sizes.
+// mkicon renders ted's app icon as PNG files: a flat navy tile with lines
+// of "code" as square-cut colour blocks, and the orange underline used for
+// the active tab.
 //
 //	go run ./tools/mkicon -out dir -sizes 16,32,...
 package main
@@ -36,16 +38,25 @@ func hex(s string) color.NRGBA {
 	return color.NRGBA{uint8(v >> 16), uint8(v >> 8), uint8(v), 0xff}
 }
 
-// shapes on a 1024-unit canvas (macOS icon grid: tile inset ~10%)
+// shapes on a 1024-unit canvas (macOS icon grid: tile inset ~10%). Flat:
+// solid fills, square-cut bars on an even grid, no pills or shading.
 func shapes() []rrect {
-	ink := hex("#332813")
-	return []rrect{
-		{64, 64, 960, 960, 206, hex("#f5c347")},
-		{230, 310, 608, 408, 23, ink},
-		{345, 365, 446, 710, 25, ink},
-		{510, 602, 772, 699, 20, ink},
+	tile := rrect{100, 100, 924, 924, 185, hex("#1f2b4d")}
+	const h, step, r = 64, 112, 6 // bar height, line pitch, corner radius
+	bar := func(line int, x, w float64, c string) rrect {
+		y := 268 + float64(line)*step
+		return rrect{x, y, x + w, y + h, r, hex(c)}
 	}
-
+	return []rrect{
+		tile,
+		bar(0, 232, 240, "#bb9af7"),             // keyword
+		bar(0, 496, 296, "#7aa2f7"),             // function
+		bar(1, 328, 200, "#9ece6a"),             // string
+		bar(1, 552, 168, "#7dcfff"),             // operator
+		bar(2, 328, 336, "#c0caf5"),             // text
+		bar(3, 232, 128, "#bb9af7"),             // closing brace
+		{232, 736, 560, 768, 0, hex("#ff9e64")}, // the active-tab underline
+	}
 }
 
 func render(size int) *image.NRGBA {

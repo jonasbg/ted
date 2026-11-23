@@ -47,7 +47,7 @@ jobs:
           else
             make build
             go run ./tools/mkicon -out build -name ted.png -sizes 256
-            tar -czf "ted-Linux-$(uname -m).tar.gz" ted -C build ted.png
+            tar -czf "ted-Linux-$(uname -m).tar.gz" ted -C build ted.png -C ../packaging ted.desktop
           fi
       - uses: actions/upload-artifact@v6
         with:

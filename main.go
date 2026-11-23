@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/alecthomas/chroma/v2/styles"
@@ -18,7 +19,7 @@ import (
 	"gioui.org/unit"
 )
 
-var version = "0.2.1"
+var version = "0.2.4"
 
 const defaultFontSp = 14
 
@@ -28,9 +29,9 @@ func usage() {
 Usage:
   ted [flags] [path[:line[:col]] ...]
 
-  ted                 open the current folder
+  ted                 restore unsaved tabs or show the welcome screen
   ted src/            open a folder
-  ted main.go         open a file (the tree shows its git project)
+  ted main.go         open a file without a folder tree
   ted main.go:42      jump to a line
   ted a.go b.go       open several files
 
@@ -44,6 +45,11 @@ Flags:
   --theme NAME        colour theme (env TED_THEME), see --themes
   --themes            list themes
   --version           print version
+
+  macOS file-type defaults (LaunchServices):
+  --set-html-default   make ted the default app for HTML files
+  --unset-html-default restore Safari as the default for HTML files
+                       (ted stays available via "Open With")
 
 Press F1 in the editor for keyboard shortcuts.
 `, version)
@@ -59,9 +65,27 @@ func main() {
 	nativeTB := flag.Bool("native-titlebar", false, "keep the standard macOS title bar")
 	newWin := flag.Bool("new", false, "open a new window")
 	flag.BoolVar(newWin, "n", false, "open a new window")
-	launcher := flag.Bool("launcher", false, "restore the last project on a desktop launch")
+	flag.Bool("launcher", false, "desktop launcher invocation")
+	setHTML := flag.Bool("set-html-default", false, "make ted the default app for HTML files (macOS)")
+	unsetHTML := flag.Bool("unset-html-default", false, "restore Safari as the default app for HTML files (macOS)")
 	flag.CommandLine.Parse(launchArgs(os.Args[1:]))
 
+	switch {
+	case *setHTML && *unsetHTML:
+		fatal(fmt.Errorf("use only one of --set-html-default and --unset-html-default"))
+	case *setHTML:
+		if err := setHTMLDefault(true); err != nil {
+			fatal(err)
+		}
+		fmt.Println("HTML files now open in ted by default")
+		return
+	case *unsetHTML:
+		if err := setHTMLDefault(false); err != nil {
+			fatal(err)
+		}
+		fmt.Println("HTML files now open in Safari by default")
+		return
+	}
 	if *showVersion {
 		fmt.Println("ted", version)
 		return
@@ -71,7 +95,7 @@ func main() {
 		return
 	}
 
-	root, targets := resolveArgs(flag.Args(), *launcher || inAppBundle())
+	root, targets := resolveArgs(flag.Args())
 	// Started from Finder, Spotlight or the Dock: macOS owns the process,
 	// so stay in the foreground instead of detaching.
 	fg := os.Getenv("TED_FOREGROUND") != "" || inAppBundle()
@@ -83,20 +107,61 @@ func main() {
 		return
 	}
 
-	w := new(app.Window)
-	opts := []app.Option{app.Title("ted"), app.Size(unit.Dp(1280), unit.Dp(820)), app.MinSize(unit.Dp(420), unit.Dp(300))}
-	w.Option(append(opts, windowOptions(*nativeTB)...)...)
-	// Theme: an explicit --theme or TED_THEME wins; on Omarchy follow the
-	// desktop theme and font; otherwise the built-in default.
 	explicit := os.Getenv("TED_THEME") != ""
 	flag.Visit(func(f *flag.Flag) {
 		if f.Name == "theme" {
 			explicit = true
 		}
 	})
-	th := newTheme(*theme)
+	cfg = windowConfig{theme: *theme, explicitTheme: explicit, nativeTitlebar: *nativeTB, wait: *wait}
+
+	if *wait {
+		// One window, no session, no IPC; the process ends with it.
+		openWindow(root, targets)
+		app.Main()
+		return
+	}
+	// Finder and the Dock deliver files to an app bundle as open-document
+	// events rather than arguments, so route those through the same logic.
+	r := newOpenRouter()
+	coldFinder := isMac && inAppBundle() && len(flag.Args()) == 0
+	go r.run(root, targets, coldFinder)
+	for e := range app.Events {
+		if u, ok := e.(app.URLEvent); ok {
+			if p, ok := fileURLPath(u.URL); ok {
+				r.paths <- p
+			}
+		}
+	}
+}
+
+// windowConfig holds the options shared by every window of this process.
+type windowConfig struct {
+	theme          string
+	explicitTheme  bool
+	nativeTitlebar bool
+	wait           bool
+}
+
+var cfg windowConfig
+
+// windows tracks the open windows by project root. The process exits when
+// the last one closes.
+var windows = struct {
+	sync.Mutex
+	byRoot map[string]*App
+}{byRoot: map[string]*App{}}
+
+// openWindow creates a window for root with the given files open.
+func openWindow(root string, targets []target) *App {
+	w := new(app.Window)
+	opts := []app.Option{app.Title("ted"), app.Size(unit.Dp(1280), unit.Dp(820)), app.MinSize(unit.Dp(420), unit.Dp(300))}
+	w.Option(append(opts, windowOptions(cfg.nativeTitlebar)...)...)
+	// Theme: an explicit --theme or TED_THEME wins; on Omarchy follow the
+	// desktop theme and font; otherwise the built-in default.
+	th := newTheme(cfg.theme)
 	var om *omarchyTheme
-	if !explicit {
+	if !cfg.explicitTheme {
 		if om = loadOmarchyTheme(); om != nil {
 			if t := themeFromOmarchy(om); t != nil {
 				th = t
@@ -105,22 +170,30 @@ func main() {
 		}
 	}
 	a := newApp(w, root, th, defaultFontSp)
-	a.omarchy, a.themeFixed = om, explicit
-	a.noSession = *wait
-	a.nativeTitlebar = *nativeTB
+	a.omarchy, a.themeFixed = om, cfg.explicitTheme
+	a.noSession = cfg.wait
+	a.nativeTitlebar = cfg.nativeTitlebar
 	if !a.noSession {
-		a.restoreSession()
+		a.restoreSession(root, root == "")
+		if root == "" && len(targets) == 0 && len(a.bufs) == 0 {
+			if last, err := os.ReadFile(lastRootFile()); err == nil {
+				if prior := strings.TrimSuffix(string(last), "\n"); prior != "" {
+					a.restoreSession(prior, true)
+				}
+			}
+		}
 	}
 	for _, t := range targets {
 		a.openFile(t.path, t.line, t.col)
 	}
-	if len(a.bufs) == 0 {
+	if len(a.bufs) == 0 && root != "" {
 		a.focus = focusTree
 	}
-	if !*wait {
+	windows.Lock()
+	windows.byRoot[root] = a
+	windows.Unlock()
+	if !cfg.wait {
 		go a.listen()
-		os.MkdirAll(cacheDir(), 0o700)
-		os.WriteFile(lastRootFile(), []byte(root+"\n"), 0o600)
 	}
 	a.startTicker()
 	a.refreshGit()
@@ -133,11 +206,21 @@ func main() {
 		}
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "ted:", err)
-			os.Exit(1)
 		}
-		os.Exit(0)
+		windows.Lock()
+		if windows.byRoot[root] == a {
+			delete(windows.byRoot, root)
+		}
+		last := len(windows.byRoot) == 0
+		windows.Unlock()
+		if last {
+			if err != nil {
+				os.Exit(1)
+			}
+			os.Exit(0)
+		}
 	}()
-	app.Main()
+	return a
 }
 
 func (a *App) loop() error {
@@ -175,12 +258,11 @@ func inAppBundle() bool {
 	return err == nil && strings.Contains(exe, ".app/Contents/MacOS/")
 }
 
-// lastRootFile remembers the most recent project, for launcher starts.
+// lastRootFile identifies the most recently saved session for draft recovery.
 func lastRootFile() string { return filepath.Join(cacheDir(), "last-root") }
 
 // resolveArgs turns command-line paths into a project root and files.
-func resolveArgs(args []string, launcher bool) (string, []target) {
-	cwd, _ := os.Getwd()
+func resolveArgs(args []string) (string, []target) {
 	var files []target
 	root := ""
 	for _, arg := range args {
@@ -202,37 +284,10 @@ func resolveArgs(args []string, launcher bool) (string, []target) {
 		}
 		files = append(files, target{abs, line, col})
 	}
-	if root == "" {
-		root = cwd
-		if len(files) > 0 {
-			// Use the file's project: its git repo, else its folder (unless
-			// it already lives under the current directory).
-			f := files[0].path
-			dir := filepath.Dir(f)
-			if top := gitToplevel(dir); top != "" {
-				root = top
-			} else if !strings.HasPrefix(f, cwd+string(filepath.Separator)) {
-				root = dir
-			}
+	if root != "" {
+		if r, err := filepath.EvalSymlinks(root); err == nil {
+			root = r
 		}
-	}
-	// Opened from an app launcher (no paths, started in / or ~): reopen the
-	// last project rather than showing the whole home folder.
-	home, _ := os.UserHomeDir()
-	if launcher && len(args) == 0 {
-		if b, err := os.ReadFile(lastRootFile()); err == nil {
-			if p := strings.TrimSpace(string(b)); p != "" {
-				if st, err := os.Stat(p); err == nil && st.IsDir() {
-					root = p
-				}
-			}
-		}
-		if root == "/" || root == "" {
-			root = home
-		}
-	}
-	if r, err := filepath.EvalSymlinks(root); err == nil {
-		root = r
 	}
 	return root, files
 }

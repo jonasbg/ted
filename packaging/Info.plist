@@ -24,5 +24,49 @@
 	<string>public.app-category.developer-tools</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Text or source code</string>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>LSHandlerRank</key>
+			<string>Owner</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.source-code</string>
+				<string>public.plain-text</string>
+				<string>public.text</string>
+				<string>public.comma-separated-values-text</string>
+				<string>public.tab-separated-values-text</string>
+				<string>net.daringfireball.markdown</string>
+				<string>public.json</string>
+				<string>public.yaml</string>
+				<string>public.shell-script</string>
+				<string>public.c-source</string>
+				<string>public.c-header</string>
+				<string>com.netscape.javascript-source</string>
+				<string>public.python-script</string>
+				<string>public.ruby-script</string>
+				<string>public.xml</string>
+			</array>
+		</dict>
+		<!-- HTML is offered in "Open With" but never claimed as the default;
+		     browsers stay the default handler for web pages. Use
+		     `ted --set-html-default` to opt in per machine. -->
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Web page</string>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.html</string>
+			</array>
+		</dict>
+	</array>
 </dict>
 </plist>
