@@ -71,8 +71,16 @@ send Ctrl/Shift+Insert, which Gio does not support yet. Super+X (Shift+Delete)
 cuts.
 
 ## Install
-Signed Omarchy packages and Homebrew builds for macOS and Linux are available
-in the [jonasbg distribution repository](https://github.com/jonasbg/omarchy).
+With Homebrew, on macOS or Linux:
+
+```sh
+brew install jonasbg/tap/ted
+```
+
+On macOS the app bundle is at `$(brew --prefix ted)/ted.app`; link it into
+`~/Applications` to get it in Spotlight and *Open With*. Signed Omarchy
+(pacman) packages are in the
+[jonasbg distribution repository](https://github.com/jonasbg/omarchy).
 
 
 Requires Go 1.27 or newer and a C compiler (cgo).
