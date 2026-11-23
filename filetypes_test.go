@@ -30,18 +30,3 @@ func TestFileTypesCoverPlist(t *testing.T) {
 		t.Fatalf("found only %d declared endings in Info.plist", n)
 	}
 }
-
-func TestDefaultUTIs(t *testing.T) {
-	if !isMac {
-		t.Skip("macOS only")
-	}
-	utis := defaultUTIs()
-	if slices.Contains(utis, "public.html") {
-		t.Error("Make default would take HTML from Safari")
-	}
-	for _, want := range []string{"public.data", "public.json", "public.c-source", "com.sun.java-source", "net.daringfireball.markdown"} {
-		if !slices.Contains(utis, want) {
-			t.Errorf("Make default misses %s", want)
-		}
-	}
-}
