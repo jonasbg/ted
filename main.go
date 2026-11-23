@@ -107,6 +107,8 @@ func main() {
 		return
 	}
 
+	go registerBundle()
+
 	explicit := os.Getenv("TED_THEME") != ""
 	flag.Visit(func(f *flag.Flag) {
 		if f.Name == "theme" {
