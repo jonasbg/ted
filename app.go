@@ -624,6 +624,7 @@ func (a *App) drainPending() {
 			a.tickN++
 			a.checkDisk()
 			a.checkMdImages()
+			a.trimWebCache()
 			a.checkOmarchyTheme()
 			if a.tickN%2 == 0 {
 				a.tree.refresh()

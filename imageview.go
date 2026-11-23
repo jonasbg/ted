@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	"gioui.org/f32"
 	"gioui.org/layout"
@@ -90,6 +91,12 @@ func decodeImage(data []byte, maxSide int) (*mdImage, image.Point, error) {
 		xdraw.CatmullRom.Scale(dst, dst.Bounds(), src, src.Bounds(), xdraw.Src, nil)
 		src = dst
 	}
+	if o := exifOrientation(data); o > 1 {
+		src = orient(src, o)
+		if o >= 5 {
+			orig = image.Pt(orig.Y, orig.X)
+		}
+	}
 	return &mdImage{op: paint.NewImageOp(src), size: src.Bounds().Size(), ok: true}, orig, nil
 }
 
@@ -110,8 +117,13 @@ func (a *App) loadImageView(b *Buffer) {
 	path := b.path
 	go func() {
 		img, orig, err := decodeImageFile(path, 4096)
+		text := err != nil && looksLikeText(path)
 		a.post(func() {
 			iv.loading = false
+			if text && iv.img == nil {
+				a.reopenAsText(b)
+				return
+			}
 			if err != nil {
 				iv.err = err.Error()
 				if iv.img != nil && b == a.buf() {
@@ -242,4 +254,36 @@ func humanSize(n int64) string {
 		return fmt.Sprintf("%d KB", (n+512)>>10)
 	}
 	return fmt.Sprintf("%d bytes", n)
+}
+
+// looksLikeText reports whether a file that failed to decode as an image is
+// really text, such as a Git LFS pointer or a mislabelled file.
+func looksLikeText(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	head := make([]byte, 8000)
+	n, _ := f.Read(head)
+	head = head[:n]
+	return n > 0 && bytes.IndexByte(head, 0) < 0 && utf8.Valid(head[:max(0, n-4)])
+}
+
+// reopenAsText replaces an image tab with a text tab for the same file.
+func (a *App) reopenAsText(b *Buffer) {
+	i := a.indexOf(b)
+	if i < 0 {
+		return
+	}
+	nb, err := loadBuffer(b.path)
+	if err != nil {
+		return
+	}
+	nb.preview = b.preview
+	nb.resolveLexer()
+	a.bufs[i] = nb
+	if i == a.active {
+		a.setMsg("%s is not an image; showing it as text", nb.name())
+	}
 }
