@@ -17,6 +17,15 @@ ted --version
 ```
 
 The macOS formula also includes a native app at `$(brew --prefix ted)/ted.app`.
+Homebrew can't put it in an Applications folder from a formula, so after
+installing it prints these commands, which add it to `~/Applications` once and
+keep it current across upgrades:
+
+```sh
+mkdir -p ~/Applications/ted.app
+ln -sfn "$(brew --prefix)/opt/ted/ted.app/Contents" ~/Applications/ted.app/Contents
+```
+
 The formula lives in [jonasbg/homebrew-tap](https://github.com/jonasbg/homebrew-tap);
 this repository hosts the archives it downloads. If you installed from the
 old `jonasbg/omarchy` tap, switch with:

@@ -52,6 +52,17 @@ print('''  on_linux do
     end
   end
 
+  def caveats
+    return unless OS.mac?
+
+    <<~EOS
+      To open Ted from Spotlight, Launchpad or the Dock, add it to
+      ~/Applications once. It follows every brew upgrade:
+        mkdir -p ~/Applications/ted.app
+        ln -sfn #{opt_prefix}/ted.app/Contents ~/Applications/ted.app/Contents
+    EOS
+  end
+
   test do
     assert_equal "ted #{version}", shell_output("#{bin}/ted --version").strip
   end

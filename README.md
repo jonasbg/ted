@@ -92,8 +92,16 @@ With Homebrew, on macOS or Linux:
 brew install jonasbg/tap/ted
 ```
 
-On macOS the app bundle is at `$(brew --prefix ted)/ted.app`; link it into
-`~/Applications` to get it in Spotlight and *Open With*. Signed Omarchy
+On macOS, add the app to `~/Applications` once to get it in Spotlight, the
+Dock and *Open With*. It follows every `brew upgrade` (Spotlight skips a plain
+symlink to the bundle, hence the folder):
+
+```sh
+mkdir -p ~/Applications/ted.app
+ln -sfn "$(brew --prefix)/opt/ted/ted.app/Contents" ~/Applications/ted.app/Contents
+```
+
+Signed Omarchy
 (pacman) packages are in the
 [jonasbg distribution repository](https://github.com/jonasbg/omarchy).
 
