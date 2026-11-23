@@ -172,6 +172,16 @@ func (a *App) drawEditor(gtx layout.Context, b *Buffer) {
 			}
 			fill(ops, image.Rect(x0, y, x1, y+lineH), col)
 		}
+		// CSV cell block
+		if b.csv != nil {
+			for _, f := range b.blockCells(li) {
+				x0, x1 := colX(visCol(line, f.start)), colX(visCol(line, f.end))
+				if x1 == x0 {
+					x1 += charW / 2 // keep empty cells visible
+				}
+				fill(ops, image.Rect(x0, y, x1, y+lineH), th.selection)
+			}
+		}
 		// search matches
 		if len(q) > 0 {
 			for _, m := range matchesInLine(line, q, cs) {
@@ -277,7 +287,7 @@ func (a *App) drawLineText(gtx layout.Context, b *Buffer, li int, line []rune, b
 	ops := gtx.Ops
 	u := &a.ui
 	def := tokStyle{fg: a.th.fg}
-	spans := b.hl.lineSpans(li)
+	spans := a.spansFor(b, li)
 	si := 0
 	var seg []rune
 	segStart := -1
@@ -479,6 +489,17 @@ func (a *App) editorClick(b *Buffer, e pointer.Event) {
 	u.dragEditor = true
 	u.dragPos = e.Position
 	inGutter := e.Position.X < float32(u.gutter.Max.X)
+	u.dragBlock = false
+	if b.csv != nil {
+		// Alt+click selects cells (a header cell takes the whole column);
+		// any other click drops the cell selection.
+		if e.Modifiers.Contain(key.ModAlt) && !inGutter {
+			b.startBlock(p, e.Modifiers.Contain(key.ModShift))
+			u.dragBlock = true
+			return
+		}
+		b.clearBlock()
+	}
 	switch {
 	case inGutter:
 		b.anchor = Pos{p.L, 0}
@@ -516,6 +537,10 @@ func (a *App) editorClick(b *Buffer, e pointer.Event) {
 func (a *App) editorDrag(b *Buffer) {
 	u := &a.ui
 	p := a.posAtPoint(b, u.dragPos)
+	if u.dragBlock && b.csv != nil {
+		b.dragBlock(p)
+		return
+	}
 	switch {
 	case u.clickCount == 2:
 		s, e := b.wordBounds(p)

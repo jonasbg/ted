@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/alecthomas/chroma/v2/styles"
@@ -45,6 +46,11 @@ Flags:
   --themes            list themes
   --version           print version
 
+  macOS file-type defaults (LaunchServices):
+  --set-html-default   make ted the default app for HTML files
+  --unset-html-default restore Safari as the default for HTML files
+                       (ted stays available via "Open With")
+
 Press F1 in the editor for keyboard shortcuts.
 `, version)
 }
@@ -60,8 +66,26 @@ func main() {
 	newWin := flag.Bool("new", false, "open a new window")
 	flag.BoolVar(newWin, "n", false, "open a new window")
 	flag.Bool("launcher", false, "desktop launcher invocation")
+	setHTML := flag.Bool("set-html-default", false, "make ted the default app for HTML files (macOS)")
+	unsetHTML := flag.Bool("unset-html-default", false, "restore Safari as the default app for HTML files (macOS)")
 	flag.CommandLine.Parse(launchArgs(os.Args[1:]))
 
+	switch {
+	case *setHTML && *unsetHTML:
+		fatal(fmt.Errorf("use only one of --set-html-default and --unset-html-default"))
+	case *setHTML:
+		if err := setHTMLDefault(true); err != nil {
+			fatal(err)
+		}
+		fmt.Println("HTML files now open in ted by default")
+		return
+	case *unsetHTML:
+		if err := setHTMLDefault(false); err != nil {
+			fatal(err)
+		}
+		fmt.Println("HTML files now open in Safari by default")
+		return
+	}
 	if *showVersion {
 		fmt.Println("ted", version)
 		return
@@ -83,20 +107,61 @@ func main() {
 		return
 	}
 
-	w := new(app.Window)
-	opts := []app.Option{app.Title("ted"), app.Size(unit.Dp(1280), unit.Dp(820)), app.MinSize(unit.Dp(420), unit.Dp(300))}
-	w.Option(append(opts, windowOptions(*nativeTB)...)...)
-	// Theme: an explicit --theme or TED_THEME wins; on Omarchy follow the
-	// desktop theme and font; otherwise the built-in default.
 	explicit := os.Getenv("TED_THEME") != ""
 	flag.Visit(func(f *flag.Flag) {
 		if f.Name == "theme" {
 			explicit = true
 		}
 	})
-	th := newTheme(*theme)
+	cfg = windowConfig{theme: *theme, explicitTheme: explicit, nativeTitlebar: *nativeTB, wait: *wait}
+
+	if *wait {
+		// One window, no session, no IPC; the process ends with it.
+		openWindow(root, targets)
+		app.Main()
+		return
+	}
+	// Finder and the Dock deliver files to an app bundle as open-document
+	// events rather than arguments, so route those through the same logic.
+	r := newOpenRouter()
+	coldFinder := isMac && inAppBundle() && len(flag.Args()) == 0
+	go r.run(root, targets, coldFinder)
+	for e := range app.Events {
+		if u, ok := e.(app.URLEvent); ok {
+			if p, ok := fileURLPath(u.URL); ok {
+				r.paths <- p
+			}
+		}
+	}
+}
+
+// windowConfig holds the options shared by every window of this process.
+type windowConfig struct {
+	theme          string
+	explicitTheme  bool
+	nativeTitlebar bool
+	wait           bool
+}
+
+var cfg windowConfig
+
+// windows tracks the open windows by project root. The process exits when
+// the last one closes.
+var windows = struct {
+	sync.Mutex
+	byRoot map[string]*App
+}{byRoot: map[string]*App{}}
+
+// openWindow creates a window for root with the given files open.
+func openWindow(root string, targets []target) *App {
+	w := new(app.Window)
+	opts := []app.Option{app.Title("ted"), app.Size(unit.Dp(1280), unit.Dp(820)), app.MinSize(unit.Dp(420), unit.Dp(300))}
+	w.Option(append(opts, windowOptions(cfg.nativeTitlebar)...)...)
+	// Theme: an explicit --theme or TED_THEME wins; on Omarchy follow the
+	// desktop theme and font; otherwise the built-in default.
+	th := newTheme(cfg.theme)
 	var om *omarchyTheme
-	if !explicit {
+	if !cfg.explicitTheme {
 		if om = loadOmarchyTheme(); om != nil {
 			if t := themeFromOmarchy(om); t != nil {
 				th = t
@@ -105,9 +170,9 @@ func main() {
 		}
 	}
 	a := newApp(w, root, th, defaultFontSp)
-	a.omarchy, a.themeFixed = om, explicit
-	a.noSession = *wait
-	a.nativeTitlebar = *nativeTB
+	a.omarchy, a.themeFixed = om, cfg.explicitTheme
+	a.noSession = cfg.wait
+	a.nativeTitlebar = cfg.nativeTitlebar
 	if !a.noSession {
 		a.restoreSession(root, root == "")
 		if root == "" && len(targets) == 0 && len(a.bufs) == 0 {
@@ -124,7 +189,10 @@ func main() {
 	if len(a.bufs) == 0 && root != "" {
 		a.focus = focusTree
 	}
-	if !*wait {
+	windows.Lock()
+	windows.byRoot[root] = a
+	windows.Unlock()
+	if !cfg.wait {
 		go a.listen()
 	}
 	a.startTicker()
@@ -138,11 +206,21 @@ func main() {
 		}
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "ted:", err)
-			os.Exit(1)
 		}
-		os.Exit(0)
+		windows.Lock()
+		if windows.byRoot[root] == a {
+			delete(windows.byRoot, root)
+		}
+		last := len(windows.byRoot) == 0
+		windows.Unlock()
+		if last {
+			if err != nil {
+				os.Exit(1)
+			}
+			os.Exit(0)
+		}
 	}()
-	app.Main()
+	return a
 }
 
 func (a *App) loop() error {

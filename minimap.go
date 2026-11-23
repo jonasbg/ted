@@ -179,7 +179,7 @@ func (a *App) paintMinimapLines(ops *op.Ops, b *Buffer, first, rows, w, lh, cw i
 				fill(ops, image.Rect(-6, y, w, y+lh), c)
 			}
 		}
-		spans := b.hl.lineSpans(li)
+		spans := a.spansFor(b, li)
 		si := 0
 		col := 0
 		runStart := -1

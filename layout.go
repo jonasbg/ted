@@ -43,6 +43,7 @@ type uiState struct {
 	lastClick    time.Time
 	lastClickPos Pos
 	dragEditor   bool
+	dragBlock    bool // dragging out a CSV cell selection
 	dragPos      f32.Point
 	dragSplit    bool
 	dragThumb    bool
@@ -335,8 +336,8 @@ func (a *App) drawStatus(gtx layout.Context) {
 			x += a.tc.draw(ops, fUIBold, px, x, bl, "deleted on disk", th.errorFg)
 		}
 	}
-	// right side
-	var right []string
+	// right side; the items are buttons, like VS Code's status bar
+	var right, ids []string
 	if b != nil {
 		pos := fmt.Sprintf("Ln %d, Col %d", b.cur.L+1, visCol(b.lines[b.cur.L], b.cur.C)+1)
 		if b.hasSel() {
@@ -361,9 +362,17 @@ func (a *App) drawStatus(gtx layout.Context) {
 			lang = "Plain Text"
 		}
 		right = []string{pos, ind, "UTF-8", eol, lang}
+		ids = []string{"pos", "indent", "enc", "eol", "lang"}
+		if b.csv != nil {
+			// selection summary, else the column under the caret
+			item := b.columnLabel()
+			if st, ok := b.selectionStats(); ok {
+				item = st.label()
+			}
+			right = append([]string{item}, right...)
+			ids = append([]string{"csv"}, ids...)
+		}
 	}
-	// The right-hand items are buttons, like VS Code's status bar.
-	ids := []string{"pos", "indent", "enc", "eol", "lang"}
 	for {
 		ev, ok := gtx.Event(pointer.Filter{Target: &u.statusTag, Kinds: pointer.Press | pointer.Move | pointer.Leave})
 		if !ok {
