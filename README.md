@@ -56,8 +56,10 @@ there instead of starting another window.
   float over a top bar that uses the theme's background colour. Drag the
   window by empty space in that bar.
 
-On Linux, click the sliders at the bottom of the sidebar or press **Ctrl+,**
-to open Settings. Choose **Make default** to open text and code files in Ted.
+Press **Cmd/Ctrl+,** or click the sliders at the bottom of the activity bar to
+open Settings. It shows the version and sets the font size and dotfiles, and
+the default app: on macOS whether HTML files open in Ted, on Linux **Make
+default** to open text and code files in Ted.
 
 Press **F1** for all shortcuts.
 

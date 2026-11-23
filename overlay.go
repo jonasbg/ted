@@ -161,6 +161,7 @@ const (
 	ovConfirm
 	ovHelp
 	ovPick
+	ovSettings
 )
 
 type button struct {
@@ -179,6 +180,7 @@ type Overlay struct {
 	grepHits  []grepHit
 	scope     searchScope
 	scopeBtn  image.Rectangle
+	htmlTed   bool // settings: ted is the HTML default (macOS)
 	gen       int
 	cancel    context.CancelFunc
 	busy      bool
@@ -418,6 +420,13 @@ func (a *App) overlayKey(e key.Event) {
 		}
 		return
 	}
+	if o.kind == ovSettings {
+		switch e.Name {
+		case key.NameEscape, key.NameReturn, key.NameEnter:
+			a.closeOverlay()
+		}
+		return
+	}
 	if o.kind == ovHelp {
 		switch e.Name {
 		case key.NameUpArrow:
@@ -489,6 +498,8 @@ func (a *App) overlayText(s string) {
 		return
 	case ovHelp:
 		a.closeOverlay()
+		return
+	case ovSettings:
 		return
 	}
 	o.in.insert(s)
@@ -609,6 +620,10 @@ func (a *App) drawOverlay(gtx layout.Context) {
 			continue
 		}
 		for i, br := range o.btns {
+			if pt.In(br) && o.kind == ovSettings {
+				o.buttons[i].action() // settings stay open
+				return
+			}
 			if pt.In(br) {
 				a.closeOverlay()
 				o.buttons[i].action()
@@ -627,8 +642,13 @@ func (a *App) drawOverlay(gtx layout.Context) {
 	event.Op(ops, &o.tag)
 	pointer.CursorDefault.Add(ops)
 	all.Pop()
-	if o.kind == ovConfirm || o.kind == ovPrompt || o.kind == ovHelp {
+	if o.kind == ovConfirm || o.kind == ovPrompt || o.kind == ovHelp || o.kind == ovSettings {
 		fill(ops, image.Rect(0, 0, W, H), withA(th.shadow, 0x40))
+	}
+	if o.kind == ovSettings {
+		o.btns = o.btns[:0]
+		a.drawSettings(gtx, o)
+		return
 	}
 
 	rowH := gtx.Dp(30)
@@ -1250,6 +1270,7 @@ func helpRows() [][2]string {
 		{"Click line numbers", "Select rows"},
 		{c + "+C", "Copy selected cells as tab-separated rows"},
 		{"View", ""},
+		{c + "+,", "Settings and version"},
 		{c + "+B", "Toggle the side panel"},
 		{c + "+Shift+E", "Files"},
 		{c + "+Shift+G", "Source control: staged, unstaged and untracked changes"},

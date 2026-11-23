@@ -88,3 +88,35 @@ func TestRefreshGitWhileBusyRunsAgain(t *testing.T) {
 		t.Fatal("a refresh asked for while one runs was dropped")
 	}
 }
+
+func TestSettingsPage(t *testing.T) {
+	dir := t.TempDir()
+	h := newHarness(t, dir)
+	h.keys(press(",", key.ModShortcut))
+	h.settle()
+	o := h.a.overlay
+	if o == nil || o.kind != ovSettings {
+		t.Fatalf("Cmd+, did not open settings: %+v", o)
+	}
+	h.shot("7-settings")
+	// buttons in draw order: close, font -, font +, dotfiles switch, ...
+	if len(o.btns) < 4 {
+		t.Fatalf("settings drew %d controls", len(o.btns))
+	}
+	font := h.a.fontSp
+	r := o.btns[2]
+	h.click(r.Min.X+r.Dx()/2, r.Min.Y+r.Dy()/2)
+	if h.a.fontSp != font+1 || h.a.overlay == nil {
+		t.Fatalf("+ gave font %v (was %v), overlay %v", h.a.fontSp, font, h.a.overlay)
+	}
+	h.settle()
+	r = o.btns[4] // close, -, +, Reset (shown once the size changed), dotfiles
+	h.click(r.Min.X+r.Dx()/2, r.Min.Y+r.Dy()/2)
+	if !h.a.tree.showHidden {
+		t.Fatal("dotfiles switch did not turn on")
+	}
+	h.keys(press(key.NameEscape))
+	if h.a.overlay != nil {
+		t.Fatal("Esc did not close settings")
+	}
+}

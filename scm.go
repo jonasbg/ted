@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"image"
 	"path/filepath"
-	"runtime"
 	"strings"
 
 	"gioui.org/io/event"
@@ -242,9 +241,6 @@ func (a *App) drawActivityBar(gtx layout.Context) {
 
 	size := gtx.Dp(48)
 	for i := range s.tabRects {
-		if i == activitySettings && runtime.GOOS != "linux" {
-			continue
-		}
 		tr := image.Rect(r.Min.X, r.Min.Y+gtx.Dp(4)+i*size, r.Max.X, r.Min.Y+gtx.Dp(4)+(i+1)*size)
 		if i == activitySettings {
 			tr = image.Rect(r.Min.X, r.Max.Y-size, r.Max.X, r.Max.Y)

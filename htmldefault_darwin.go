@@ -12,6 +12,7 @@ import "C"
 
 import (
 	"fmt"
+	"strings"
 	"unsafe"
 )
 
@@ -42,4 +43,22 @@ func setHTMLDefault(on bool) error {
 		return fmt.Errorf("LaunchServices refused to change the HTML default (status %d)", st)
 	}
 	return nil
+}
+
+// htmlDefaultIsTed reports whether ted is the default app for HTML files.
+func htmlDefaultIsTed() bool {
+	utiC := C.CString(htmlUTI)
+	defer C.free(unsafe.Pointer(utiC))
+	uti := C.CFStringCreateWithCString(C.kCFAllocatorDefault, utiC, C.kCFStringEncodingUTF8)
+	defer C.CFRelease(C.CFTypeRef(uti))
+	h := C.LSCopyDefaultRoleHandlerForContentType(uti, C.LSRolesMask(C.kLSRolesAll))
+	if h == 0 {
+		return false
+	}
+	defer C.CFRelease(C.CFTypeRef(h))
+	var buf [256]C.char
+	if C.CFStringGetCString(h, &buf[0], C.CFIndex(len(buf)), C.kCFStringEncodingUTF8) == 0 {
+		return false
+	}
+	return strings.EqualFold(C.GoString(&buf[0]), tedBundle) // LaunchServices may lower-case it
 }

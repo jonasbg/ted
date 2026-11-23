@@ -66,10 +66,12 @@ func (a *App) onKey(gtx layout.Context, e key.Event) {
 	if sc {
 		switch e.Name {
 		case ",":
-			if runtime.GOOS == "linux" {
+			if o := a.overlay; o != nil && o.kind == ovSettings {
+				a.closeOverlay()
+			} else {
 				a.openSettings()
-				return
 			}
+			return
 		case "K":
 			if !shift {
 				q := ""
