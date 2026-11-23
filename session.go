@@ -31,6 +31,7 @@ type sessionFile struct {
 	Sidebar bool         `json:"sidebar"`
 	Width   float32      `json:"sidebar_width"`
 	Font    float32      `json:"font"`
+	Dotfile bool         `json:"dotfiles,omitempty"`
 	Tabs    []sessionTab `json:"tabs"`
 }
 
@@ -53,7 +54,7 @@ func sessionPath(root string) string {
 
 func (a *App) sessionSignature() string {
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "%d|%v|%v|", a.active, a.showSidebar, a.fontSp)
+	fmt.Fprintf(&sb, "%d|%v|%v|%v|", a.active, a.showSidebar, a.fontSp, a.tree.showHidden)
 	for _, b := range a.bufs {
 		fmt.Fprintf(&sb, "%s:%d:%v:%d;", b.path, b.cur.L, b.dirty(), b.version)
 	}
@@ -95,7 +96,7 @@ func (a *App) saveSession() {
 func (a *App) sessionSnapshot() (uint64, sessionFile) {
 	a.sessionSig = a.sessionSignature()
 	a.sessionSeq++
-	s := sessionFile{Root: a.root, Active: a.active, Sidebar: a.showSidebar, Width: a.sidebarDp, Font: a.fontSp}
+	s := sessionFile{Root: a.root, Active: a.active, Sidebar: a.showSidebar, Width: a.sidebarDp, Font: a.fontSp, Dotfile: a.tree.showHidden}
 	for _, b := range a.bufs {
 		t := sessionTab{Path: b.path, Line: b.cur.L + 1, Col: b.cur.C + 1, Vy: b.vy, Preview: b.preview}
 		if b.dirty() {
@@ -147,6 +148,9 @@ func (a *App) restoreSession(root string, unsavedOnly bool) {
 	}
 	if s.Font > 0 {
 		a.fontSp = s.Font
+	}
+	if s.Dotfile && !a.tree.showHidden {
+		a.setDotfiles(true)
 	}
 	a.showSidebar = a.root != "" && (s.Sidebar || len(s.Tabs) == 0)
 	restored := 0

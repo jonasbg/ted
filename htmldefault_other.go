@@ -9,3 +9,5 @@ import "errors"
 func setHTMLDefault(on bool) error {
 	return errors.New("--set-html-default is only available on macOS")
 }
+
+func htmlDefaultIsTed() bool { return false }
