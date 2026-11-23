@@ -181,10 +181,13 @@ type Overlay struct {
 	scope     searchScope
 	scopeBtn  image.Rectangle
 	htmlTed   bool // settings: ted is the HTML default (macOS)
-	gen       int
-	cancel    context.CancelFunc
-	busy      bool
-	truncated bool
+	showTypes bool // settings: list the supported file types
+	// settings: how many supported file types open in ted (macOS)
+	tedDefaults, allDefaults int
+	gen                      int
+	cancel                   context.CancelFunc
+	busy                     bool
+	truncated                bool
 
 	onSubmit     func(string)
 	pathComplete bool

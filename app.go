@@ -614,11 +614,11 @@ func (a *App) drainPending() {
 			a.settingDefaults = false
 			if d.err != nil {
 				a.setErr("%v", d.err)
-				if o := a.overlay; o != nil && o.kind == ovSettings {
-					o.htmlTed = isMac && htmlDefaultIsTed()
-				}
 			} else {
 				a.setMsg("%s", d.msg)
+			}
+			if o := a.overlay; o != nil && o.kind == ovSettings {
+				a.refreshDefaults(o)
 			}
 		case tickEvent:
 			a.tickN++

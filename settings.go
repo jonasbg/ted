@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	_ "embed"
 	"fmt"
 	"image"
@@ -26,7 +27,17 @@ type defaultsResult struct {
 // file tree options, and the default-app association for this platform.
 func (a *App) openSettings() {
 	a.closeOverlay()
-	a.overlay = &Overlay{hover: -1, hoverBtn: -1, kind: ovSettings, htmlTed: isMac && htmlDefaultIsTed()}
+	o := &Overlay{hover: -1, hoverBtn: -1, kind: ovSettings}
+	a.overlay = o
+	a.refreshDefaults(o)
+}
+
+// refreshDefaults reads which file types open in ted (macOS).
+func (a *App) refreshDefaults(o *Overlay) {
+	if isMac {
+		o.htmlTed = htmlDefaultIsTed()
+		o.tedDefaults, o.allDefaults = defaultsCount()
+	}
 }
 
 func osName() string {
@@ -57,6 +68,8 @@ func (a *App) setDotfiles(on bool) {
 type settingsRow struct {
 	label, help string
 	draw        func(r image.Rectangle) // draws the control right-aligned in r
+	h           int                     // height when not the usual row height
+	full        func(r image.Rectangle) // draws the whole row instead of label and control
 }
 
 func (a *App) drawSettings(gtx layout.Context, o *Overlay) {
@@ -87,6 +100,9 @@ func (a *App) drawSettings(gtx layout.Context, o *Overlay) {
 		a.tc.draw(ops, fUIBold, a.ui.uiPx, r.Min.X+(r.Dx()-w)/2, a.uiBaseline(r.Min.Y, r.Dy()), label, fg)
 	}
 	ctlH := gtx.Dp(28)
+	pad := gtx.Dp(28)
+	bw := min(W-gtx.Dp(40), gtx.Dp(580))
+	bx := (W - bw) / 2
 	// toggle draws an on/off switch at the right edge of r
 	toggle := func(r image.Rectangle, on bool, set func(bool)) {
 		w, h := gtx.Dp(40), gtx.Dp(22)
@@ -117,8 +133,8 @@ func (a *App) drawSettings(gtx layout.Context, o *Overlay) {
 		rows  []settingsRow
 	}{
 		{"Editor", []settingsRow{{
-			"Font size", sc + "+= and " + sc + "+- also change it, " + sc + "+0 resets",
-			func(r image.Rectangle) {
+			label: "Font size", help: sc + "+= and " + sc + "+- also change it, " + sc + "+0 resets",
+			draw: func(r image.Rectangle) {
 				y := r.Min.Y + (r.Dy()-ctlH)/2
 				x := r.Max.X
 				plus := image.Rect(x-ctlH, y, x, y+ctlH)
@@ -136,12 +152,12 @@ func (a *App) drawSettings(gtx layout.Context, o *Overlay) {
 			},
 		}}},
 		{"File tree", []settingsRow{{
-			"Show dotfiles", "Names starting with a dot. Press . in the file tree to toggle",
-			func(r image.Rectangle) { toggle(r, a.tree.showHidden, a.setDotfiles) },
+			label: "Show dotfiles", help: "Names starting with a dot. Press . in the file tree to toggle",
+			draw: func(r image.Rectangle) { toggle(r, a.tree.showHidden, a.setDotfiles) },
 		}}},
 		{"Markdown preview", []settingsRow{{
-			"Link cards and web images", "Fetches pages linked on a line of their own, and remote images",
-			func(r image.Rectangle) {
+			label: "Link cards and web images", help: "Fetches pages linked on a line of their own, and remote images",
+			draw: func(r image.Rectangle) {
 				toggle(r, !a.noWeb, func(on bool) {
 					a.noWeb = !on
 					a.webVer++
@@ -154,9 +170,26 @@ func (a *App) drawSettings(gtx layout.Context, o *Overlay) {
 		sections = append(sections, struct {
 			title string
 			rows  []settingsRow
-		}{"Default app", []settingsRow{{
-			"Open HTML files in Ted", "When off, HTML files open in Safari",
-			func(r image.Rectangle) {
+		}{"Default app", append([]settingsRow{{
+			label: "Open supported files in Ted", help: defaultsHelp(o),
+			draw: func(r image.Rectangle) {
+				y := r.Min.Y + (r.Dy()-ctlH)/2
+				w := a.tc.width(fUIBold, a.ui.uiPx, "Make default") + gtx.Dp(28)
+				mk := image.Rect(r.Max.X-w, y, r.Max.X, y+ctlH)
+				pill(mk, "Make default", false, func() {
+					a.setDefaults("Ted is the default app for its file types; HTML still opens in Safari", setAllDefaults)
+				})
+				label := "Show types"
+				if o.showTypes {
+					label = "Hide types"
+				}
+				sw := a.tc.width(fUIBold, a.ui.uiPx, label) + gtx.Dp(24)
+				pill(image.Rect(mk.Min.X-gtx.Dp(8)-sw, y, mk.Min.X-gtx.Dp(8), y+ctlH), label, false, func() { o.showTypes = !o.showTypes })
+			},
+		}}, a.fileTypesRows(gtx, o, bw-2*pad)...)})
+		sections[len(sections)-1].rows = append(sections[len(sections)-1].rows, settingsRow{
+			label: "Open HTML files in Ted", help: "When off, HTML files open in Safari",
+			draw: func(r image.Rectangle) {
 				toggle(r, o.htmlTed, func(on bool) {
 					o.htmlTed = on
 					msg := "HTML files now open in Safari"
@@ -166,14 +199,14 @@ func (a *App) drawSettings(gtx layout.Context, o *Overlay) {
 					a.setDefaults(msg, func() error { return setHTMLDefault(on) })
 				})
 			},
-		}}})
+		})
 	case "linux":
 		sections = append(sections, struct {
 			title string
 			rows  []settingsRow
 		}{"Default app", []settingsRow{{
-			"Open text and code files in Ted", "Sets Ted as the handler for its file types with gio mime",
-			func(r image.Rectangle) {
+			label: "Open text and code files in Ted", help: "Sets Ted as the handler for its file types with gio mime",
+			draw: func(r image.Rectangle) {
 				w := a.tc.width(fUIBold, a.ui.uiPx, "Make default") + gtx.Dp(28)
 				y := r.Min.Y + (r.Dy()-ctlH)/2
 				pill(image.Rect(r.Max.X-w, y, r.Max.X, y+ctlH), "Make default", false, func() {
@@ -183,18 +216,22 @@ func (a *App) drawSettings(gtx layout.Context, o *Overlay) {
 		}}})
 	}
 
-	pad := gtx.Dp(28)
 	headH := gtx.Dp(104)
 	secH := gtx.Dp(36)
 	rowH := gtx.Dp(56)
 	footH := gtx.Dp(68)
 	bh := headH + footH
 	for _, s := range sections {
-		bh += secH + len(s.rows)*rowH
+		bh += secH
+		for _, row := range s.rows {
+			bh += cmp.Or(row.h, rowH)
+		}
 	}
-	bw := min(W-gtx.Dp(40), gtx.Dp(580))
-	bx := (W - bw) / 2
-	by := max(gtx.Dp(40), min(gtx.Dp(72), (H-bh)/2))
+	// taller than the window: the page scrolls
+	top := max(gtx.Dp(40), min(gtx.Dp(72), (H-bh)/2))
+	o.rowPx = 1
+	o.scroll = max(0, min(o.scroll, bh+top+gtx.Dp(24)-H))
+	by := top - o.scroll
 	rad := gtx.Dp(12)
 	o.box = image.Rect(bx, by, bx+bw, by+bh)
 	shadow(ops, o.box, rad, gtx.Dp(22), th.shadow)
@@ -226,6 +263,11 @@ func (a *App) drawSettings(gtx layout.Context, o *Overlay) {
 		a.tc.draw(ops, fUIBold, gtx.Sp(11), bx+pad, y+gtx.Dp(26), strings.ToUpper(s.title), th.accent)
 		y += secH
 		for _, row := range s.rows {
+			if row.full != nil {
+				row.full(image.Rect(bx+pad, y, bx+bw-pad, y+row.h))
+				y += row.h
+				continue
+			}
 			a.tc.draw(ops, fUI, a.ui.uiPx, bx+pad, y+gtx.Dp(22), row.label, th.fg)
 			ctl := image.Rect(bx+bw/2, y, bx+bw-pad, y+rowH)
 			hw := bw - 2*pad - gtx.Dp(130)
@@ -291,4 +333,61 @@ func setFileDefaults() error {
 func hexColor(s string) color.NRGBA {
 	c, _ := parseHex(s)
 	return c
+}
+
+func defaultsHelp(o *Overlay) string {
+	switch {
+	case o.allDefaults == 0:
+		return "HTML is left to Safari"
+	case o.tedDefaults == o.allDefaults:
+		return fmt.Sprintf("Ted opens all %d file types. HTML is left to Safari", o.allDefaults)
+	}
+	return fmt.Sprintf("Ted opens %d of %d file types. HTML is left to Safari", o.tedDefaults, o.allDefaults)
+}
+
+// fileTypesRows lists the endings "Make default" covers, when shown.
+func (a *App) fileTypesRows(gtx layout.Context, o *Overlay, w int) []settingsRow {
+	if !o.showTypes {
+		return nil
+	}
+	px := gtx.Sp(12)
+	type group struct {
+		label string
+		f     face
+		lines []string
+	}
+	labelW := 0
+	groups := []group{}
+	add := func(label string, f face, text string) {
+		groups = append(groups, group{label: label, f: f, lines: []string{text}})
+		labelW = max(labelW, a.tc.width(fUIBold, px, label))
+	}
+	for _, g := range fileTypes {
+		add(g.label, fMono, dotted(g.exts))
+	}
+	add("No ending", fUI, noExtensionLabel)
+	add("Open With only", fMono, dotted(openWithOnly))
+	labelW += gtx.Dp(16)
+	lh := gtx.Dp(18)
+	h := gtx.Dp(4)
+	for i := range groups {
+		g := &groups[i]
+		g.lines = wrapText(a.tc, g.f, px, w-labelW-gtx.Dp(20), g.lines[0], 20) // 10dp inset each side
+		h += len(g.lines)*lh + gtx.Dp(6)
+	}
+	h += gtx.Dp(10)
+	return []settingsRow{{h: h, full: func(r image.Rectangle) {
+		th := a.th
+		rrect(gtx.Ops, r, gtx.Dp(6), th.panel2)
+		y := r.Min.Y + gtx.Dp(6)
+		x := r.Min.X + gtx.Dp(10)
+		for _, g := range groups {
+			a.tc.draw(gtx.Ops, fUIBold, px, x, y+gtx.Dp(13), g.label, th.dim)
+			for _, line := range g.lines {
+				a.tc.draw(gtx.Ops, g.f, px, x+labelW, y+gtx.Dp(13), line, th.fg)
+				y += lh
+			}
+			y += gtx.Dp(6)
+		}
+	}}}
 }
