@@ -3,6 +3,7 @@ package main
 import (
 	"image/color"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 
@@ -333,11 +334,9 @@ func (h *highlightState) spliceLines(i, del, ins int) {
 	if i > 0 {
 		fill = h.spans[i-1]
 	}
-	out := make([][]span, 0, len(h.spans)-del+ins)
-	out = append(out, h.spans[:i]...)
-	for k := 0; k < ins; k++ {
-		out = append(out, fill)
+	fills := make([][]span, ins)
+	for k := range fills {
+		fills[k] = fill
 	}
-	out = append(out, h.spans[i+del:]...)
-	h.spans = out
+	h.spans = slices.Replace(h.spans, i, i+del, fills...)
 }

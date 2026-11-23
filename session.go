@@ -69,11 +69,32 @@ func (a *App) saveSessionIfChanged() {
 	}
 }
 
+// autosaveSession is saveSessionIfChanged for the periodic tick: the
+// snapshot is taken here, but encoding and writing it (tens of ms for a
+// large unsaved file) happen off the UI goroutine.
+func (a *App) autosaveSession() {
+	if a.noSession {
+		return
+	}
+	if sig := a.sessionSignature(); sig != a.sessionSig {
+		seq, s := a.sessionSnapshot()
+		go a.writeSession(seq, s)
+	}
+}
+
+// saveSession writes the session now; it waits for any background write.
 func (a *App) saveSession() {
 	if a.noSession {
 		return
 	}
+	a.writeSession(a.sessionSnapshot())
+}
+
+// sessionSnapshot captures the session on the UI goroutine. seq orders
+// snapshots so an older background write never replaces a newer file.
+func (a *App) sessionSnapshot() (uint64, sessionFile) {
 	a.sessionSig = a.sessionSignature()
+	a.sessionSeq++
 	s := sessionFile{Root: a.root, Active: a.active, Sidebar: a.showSidebar, Width: a.sidebarDp, Font: a.fontSp}
 	for _, b := range a.bufs {
 		t := sessionTab{Path: b.path, Line: b.cur.L + 1, Col: b.cur.C + 1, Vy: b.vy, Preview: b.preview}
@@ -88,16 +109,26 @@ func (a *App) saveSession() {
 		}
 		s.Tabs = append(s.Tabs, t)
 	}
+	return a.sessionSeq, s
+}
+
+func (a *App) writeSession(seq uint64, s sessionFile) {
+	a.sessionMu.Lock()
+	defer a.sessionMu.Unlock()
+	if seq <= a.sessionDone {
+		return // a newer snapshot is already on disk
+	}
+	a.sessionDone = seq
 	data, err := json.Marshal(s)
 	if err != nil {
 		return
 	}
-	p := sessionPath(a.root)
+	p := sessionPath(s.Root)
 	os.MkdirAll(filepath.Dir(p), 0o700)
 	tmp := p + ".tmp"
 	if err := os.WriteFile(tmp, data, 0o600); err == nil {
 		if os.Rename(tmp, p) == nil {
-			os.WriteFile(lastRootFile(), []byte(a.root+"\n"), 0o600)
+			os.WriteFile(lastRootFile(), []byte(s.Root+"\n"), 0o600)
 		}
 	}
 }
