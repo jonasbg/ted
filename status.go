@@ -17,6 +17,8 @@ func (a *App) statusClick(id string) {
 	}
 	a.closeOverlay()
 	switch id {
+	case "md":
+		a.toggleMarkdownPreview()
 	case "pos":
 		a.gotoLinePrompt()
 	case "csv":

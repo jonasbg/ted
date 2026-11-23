@@ -25,6 +25,7 @@ const (
 	fUI
 	fUIBold
 	fUIItalic
+	fUIBoldItalic
 	nFaces
 )
 
@@ -39,6 +40,7 @@ var faceFonts = [nFaces]font.Font{
 	fUI:             {Typeface: uiFamilies},
 	fUIBold:         {Typeface: uiFamilies, Weight: font.SemiBold},
 	fUIItalic:       {Typeface: uiFamilies, Style: font.Italic},
+	fUIBoldItalic:   {Typeface: uiFamilies, Weight: font.SemiBold, Style: font.Italic},
 }
 
 func monoFace(st tokStyle) face {

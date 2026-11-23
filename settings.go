@@ -139,6 +139,15 @@ func (a *App) drawSettings(gtx layout.Context, o *Overlay) {
 			"Show dotfiles", "Names starting with a dot. Press . in the file tree to toggle",
 			func(r image.Rectangle) { toggle(r, a.tree.showHidden, a.setDotfiles) },
 		}}},
+		{"Markdown preview", []settingsRow{{
+			"Link cards and web images", "Fetches pages linked on a line of their own, and remote images",
+			func(r image.Rectangle) {
+				toggle(r, !a.noWeb, func(on bool) {
+					a.noWeb = !on
+					a.webVer++
+				})
+			},
+		}}},
 	}
 	switch runtime.GOOS {
 	case "darwin":

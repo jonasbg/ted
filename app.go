@@ -111,6 +111,12 @@ type App struct {
 	lastSize       [2]int
 
 	ui uiState
+
+	// web content for Markdown previews (link cards, remote images)
+	noWeb   bool
+	og      map[string]*ogCard
+	webImgs map[string]*webImage
+	webVer  int
 }
 
 func newApp(w *app.Window, root string, th *Theme, fontSp float32) *App {
@@ -210,7 +216,13 @@ func (a *App) open(path string, line, col int, preview bool) bool {
 			return true
 		}
 	}
-	b, err := loadBuffer(path)
+	var b *Buffer
+	var err error
+	if isImagePath(path) {
+		b, err = loadImageBuffer(path)
+	} else {
+		b, err = loadBuffer(path)
+	}
 	if err != nil {
 		if err == errBinary {
 			a.setErr("%s is a binary file", a.rel(path))
@@ -267,6 +279,9 @@ func (a *App) placeBuffer(b *Buffer, preview bool) {
 }
 
 func (a *App) gotoPos(b *Buffer, line, col int) {
+	if b.md != nil {
+		b.md.on = false // a jump to a line means the source
+	}
 	b.cur = b.clamp(Pos{line - 1, max(col-1, 0)})
 	b.selecting = false
 	b.wantCol = -1
@@ -519,6 +534,10 @@ func (a *App) checkDisk() {
 		if b.modTime.IsZero() || (st.ModTime().Equal(b.modTime) && st.Size() == b.size) {
 			continue
 		}
+		if b.image != nil {
+			a.imageChanged(b, st)
+			continue
+		}
 		if b.dirty() {
 			if !b.conflict {
 				b.conflict = true
@@ -548,6 +567,8 @@ func (a *App) drainPending() {
 	a.mu.Unlock()
 	for _, d := range evs {
 		switch d := d.(type) {
+		case func():
+			d()
 		case hlResult:
 			h := d.buf.hl
 			h.running = false
@@ -602,6 +623,7 @@ func (a *App) drainPending() {
 		case tickEvent:
 			a.tickN++
 			a.checkDisk()
+			a.checkMdImages()
 			a.checkOmarchyTheme()
 			if a.tickN%2 == 0 {
 				a.tree.refresh()
