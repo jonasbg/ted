@@ -68,12 +68,13 @@ type App struct {
 	mu      sync.Mutex
 	pending []any
 
-	files        []string
-	filesLoading bool
-	gitBusy      bool
-	branch       string
-	tickN        int
-	sessionSig   string
+	files          []string
+	filesLoading   bool
+	lastGitRefresh time.Time
+	gitBusy        bool
+	branch         string
+	tickN          int
+	sessionSig     string
 
 	lineCopy    string
 	pasteTarget focusArea
@@ -469,11 +470,19 @@ func (a *App) loadFiles() {
 	}()
 }
 
+func (a *App) gitPollInterval() time.Duration {
+	if a.focused && a.showSidebar && (a.sideView == sideChanges || a.sideView == sideHistory) {
+		return 2 * time.Second
+	}
+	return 15 * time.Second
+}
+
 func (a *App) refreshGit() {
 	if a.tree.gitRoot == "" || a.gitBusy {
 		return
 	}
 	a.gitBusy = true
+	a.lastGitRefresh = time.Now()
 	root := a.tree.gitRoot
 	prev := a.scm.head
 	wantLog := !a.scm.logLoaded && a.sideView == sideHistory
@@ -577,6 +586,8 @@ func (a *App) drainPending() {
 			a.checkOmarchyTheme()
 			if a.tickN%2 == 0 {
 				a.tree.refresh()
+			}
+			if time.Since(a.lastGitRefresh) >= a.gitPollInterval() {
 				a.refreshGit()
 			}
 			if a.tickN%3 == 0 {

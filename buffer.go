@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 	"unicode"
@@ -77,7 +78,7 @@ type Buffer struct {
 	vy, vx         float32 // scroll offsets in pixels
 	centerOnCursor bool
 	widest         int // cached width of the widest line, in columns
-	widestVer      int
+	lineWidths     []int
 	lineStarts     []int
 	lineStartsVer  int
 
@@ -137,6 +138,8 @@ func (b *Buffer) setContent(data []byte) {
 		s = strings.ReplaceAll(s, "\r\n", "\n")
 	}
 	b.lines = splitLines(s)
+	b.lineWidths = nil
+	b.widest = 0
 	b.indent = detectIndent(b.lines, b.path)
 	b.version++
 }
@@ -272,6 +275,7 @@ func (b *Buffer) rawInsert(p Pos, text []rune) Pos {
 		nl := make([]rune, 0, len(head)+len(text)+len(tail))
 		nl = append(append(append(nl, head...), text...), tail...)
 		b.lines[p.L] = nl
+		b.updateWidths(p.L, 1, 1)
 		return Pos{p.L, p.C + len(text)}
 	}
 	newLines := make([][]rune, len(segs))
@@ -287,6 +291,7 @@ func (b *Buffer) rawInsert(p Pos, text []rune) Pos {
 	out = append(out, newLines...)
 	out = append(out, b.lines[p.L+1:]...)
 	b.lines = out
+	b.updateWidths(p.L, 1, len(newLines))
 	return Pos{p.L + len(segs) - 1, len(last)}
 }
 
@@ -314,12 +319,18 @@ func (b *Buffer) rawDelete(a, c Pos) []rune {
 	tail := b.lines[c.L][c.C:]
 	nl := make([]rune, 0, len(head)+len(tail))
 	nl = append(append(nl, head...), tail...)
+	if a.L == c.L {
+		b.lines[a.L] = nl
+		b.updateWidths(a.L, 1, 1)
+		return removed
+	}
 	b.hl.spliceLines(a.L+1, c.L-a.L, 0)
 	out := make([][]rune, 0, len(b.lines)-(c.L-a.L))
 	out = append(out, b.lines[:a.L]...)
 	out = append(out, nl)
 	out = append(out, b.lines[c.L+1:]...)
 	b.lines = out
+	b.updateWidths(a.L, c.L-a.L+1, 1)
 	return removed
 }
 
@@ -656,22 +667,36 @@ func isWordRune(r rune) bool {
 	return r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r)
 }
 
-// maxCols returns the width of the widest line in columns, cached per edit.
+// Widths are initialized on first display. Edits only measure changed lines.
 func (b *Buffer) maxCols() int {
-	if b.widestVer == b.version && b.widest > 0 {
-		return b.widest
+	if b.lineWidths == nil {
+		b.lineWidths = make([]int, len(b.lines))
+		b.updateWidths(0, len(b.lines), len(b.lines))
 	}
-	best := 0
-	for _, l := range b.lines {
-		// visCol is at most 4x the rune count (tabs), so skip lines that
-		// can't beat the current best without measuring them
-		if len(l)*4 <= best {
-			continue
-		}
-		if w := visCol(l, len(l)); w > best {
-			best = w
-		}
+	return b.widest
+}
+
+func (b *Buffer) updateWidths(first, oldCount, newCount int) {
+	if b.lineWidths == nil {
+		return
 	}
-	b.widest, b.widestVer = best, b.version
-	return best
+	oldMax := b.widest
+	removedMax := slices.Contains(b.lineWidths[first:first+oldCount], oldMax)
+	if newCount < oldCount {
+		b.lineWidths = slices.Delete(b.lineWidths, first+newCount, first+oldCount)
+	} else if newCount > oldCount {
+		b.lineWidths = slices.Insert(b.lineWidths, first+oldCount, make([]int, newCount-oldCount)...)
+	}
+	newMax := 0
+	for i := first; i < first+newCount; i++ {
+		line := b.lines[i]
+		w := visCol(line, len(line))
+		b.lineWidths[i] = w
+		newMax = max(newMax, w)
+	}
+	if removedMax && newMax < oldMax {
+		b.widest = slices.Max(b.lineWidths)
+	} else {
+		b.widest = max(oldMax, newMax)
+	}
 }

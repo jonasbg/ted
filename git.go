@@ -45,29 +45,32 @@ func gitOut(root string, args ...string) ([]byte, error) {
 	return out, err
 }
 
-// gitChanges lists staged, unstaged and untracked files.
-func gitChanges(root string) []gitChange {
-	out, err := gitOut(root, "status", "--porcelain=v1", "-z", "-uall", "--ignore-submodules")
+// Read status once for both views. Only the Changes panel caps its row count.
+func readGitStatus(root string) (map[string]byte, []gitChange) {
+	data, err := exec.Command("git", "-C", root, "status", "--porcelain=v1", "-z", "-uall", "--ignore-submodules").Output()
 	if err != nil {
-		return nil
+		return nil, nil
 	}
-	var cs []gitChange
-	recs := bytes.Split(out, []byte{0})
-	for i := 0; i < len(recs) && len(cs) < 5000; i++ {
-		r := recs[i]
-		if len(r) < 4 {
+	status := make(map[string]byte)
+	var changes []gitChange
+	for len(data) > 0 {
+		var rec []byte
+		rec, data, _ = bytes.Cut(data, []byte{0})
+		if len(rec) < 4 {
 			continue
 		}
-		c := gitChange{x: r[0], y: r[1], path: string(r[3:])}
-		if c.x == 'R' || c.x == 'C' {
-			if i+1 < len(recs) {
-				c.orig = string(recs[i+1])
-			}
-			i++
+		c := gitChange{x: rec[0], y: rec[1], path: string(rec[3:])}
+		if c.x == 'R' || c.x == 'C' || c.y == 'R' || c.y == 'C' {
+			var orig []byte
+			orig, data, _ = bytes.Cut(data, []byte{0})
+			c.orig = string(orig)
 		}
-		cs = append(cs, c)
+		recordTreeStatus(status, root, c)
+		if len(changes) < 5000 {
+			changes = append(changes, c)
+		}
 	}
-	return cs
+	return status, changes
 }
 
 func gitLog(root string, n int) []gitCommit {
@@ -89,7 +92,8 @@ func gitLog(root string, n int) []gitCommit {
 
 // gitSnapshotFor gathers everything the views need in one background pass.
 func gitSnapshotFor(root, prevHead string, wantLog bool) gitSnapshot {
-	s := gitSnapshot{status: gitStatus(root), changes: gitChanges(root)}
+	var s gitSnapshot
+	s.status, s.changes = readGitStatus(root)
 	if out, err := gitOut(root, "branch", "--show-current"); err == nil {
 		s.branch = strings.TrimSpace(string(out))
 	}
