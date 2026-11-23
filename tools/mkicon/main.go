@@ -1,4 +1,4 @@
-// mkicon renders ted's app icon as PNG files: a flat dark tile with lines
+// mkicon renders ted's app icon as PNG files: a flat navy tile with lines
 // of "code" as square-cut colour blocks, and the orange underline used for
 // the active tab.
 //
@@ -41,7 +41,7 @@ func hex(s string) color.NRGBA {
 // shapes on a 1024-unit canvas (macOS icon grid: tile inset ~10%). Flat:
 // solid fills, square-cut bars on an even grid, no pills or shading.
 func shapes() []rrect {
-	tile := rrect{100, 100, 924, 924, 185, hex("#1a1b26")}
+	tile := rrect{100, 100, 924, 924, 185, hex("#1f2b4d")}
 	const h, step, r = 64, 112, 6 // bar height, line pitch, corner radius
 	bar := func(line int, x, w float64, c string) rrect {
 		y := 268 + float64(line)*step
