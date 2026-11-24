@@ -145,6 +145,22 @@ func (a *App) drawEditor(gtx layout.Context, b *Buffer) {
 				fill(ops, row, c)
 			}
 		}
+		// base64 decoded in place
+		for _, sp := range b.b64 {
+			if li < sp.a.L || li > sp.c.L {
+				continue
+			}
+			sc, ec := 0, len(line)
+			if li == sp.a.L {
+				sc = sp.a.C
+			}
+			if li == sp.c.L {
+				ec = sp.c.C
+			}
+			x0, x1 := colX(visCol(line, sc)), colX(visCol(line, ec))
+			fill(ops, image.Rect(x0, y, x1, y+lineH), withA(th.accent, 0x1c))
+			fill(ops, image.Rect(x0, y+lineH-gtx.Dp(1), x1, y+lineH), withA(th.accent, 0x80))
+		}
 		// indent guides
 		ind := indentCols(b, li)
 		for k := 0; k*iw < ind; k++ {
@@ -505,6 +521,11 @@ func (a *App) editorClick(b *Buffer, e pointer.Event) {
 	u.dragPos = e.Position
 	inGutter := e.Position.X < float32(u.gutter.Max.X)
 	u.dragBlock = false
+	if e.Modifiers.Contain(key.ModShortcut) && !inGutter && b.image == nil && a.toggleBase64(b, p) {
+		u.dragEditor = false
+		u.clickCount = 0
+		return
+	}
 	if b.csv != nil {
 		// Alt+click selects cells (a header cell takes the whole column);
 		// any other click drops the cell selection.

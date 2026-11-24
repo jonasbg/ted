@@ -393,6 +393,16 @@ func (a *App) drawStatus(gtx layout.Context) {
 		} else if isMarkdown(b) {
 			right = append([]string{"Preview"}, right...)
 			ids = append([]string{"md"}, ids...)
+		} else if b.jsonView || b.jsonRaw && !b.dirty() {
+			label := "Formatted view"
+			if b.jsonRaw {
+				label = "Minified"
+			}
+			right = append([]string{label}, right...)
+			ids = append([]string{"jsonview"}, ids...)
+		} else if isJSON(b) && !b.readOnly {
+			right = append([]string{"Format"}, right...)
+			ids = append([]string{"fmt"}, ids...)
 		}
 	}
 	for {

@@ -106,7 +106,7 @@ func (a *App) sessionSnapshot() (uint64, sessionFile) {
 			t.MdVy = b.md.vy
 		}
 		if b.dirty() {
-			txt := b.text()
+			txt := b.textEncoded() // never store decoded base64
 			t.Unsaved = &txt
 			if !b.modTime.IsZero() {
 				t.DiskMod = b.modTime.UnixNano()
