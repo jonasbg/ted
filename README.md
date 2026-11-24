@@ -140,7 +140,9 @@ default.
 
 Another editor installed earlier may still be the default for some of
 these. **Make default** in Settings makes ted the default for all of them,
-including files with no ending, and leaves HTML alone.
+including files with no ending, and leaves HTML alone. After an upgrade,
+the first launch tells macOS to re-read the app, so new file types take
+effect even through the `~/Applications/ted.app` link.
 
 Files opened from Finder, the Dock or *Open With* go to an open project
 window that contains them, else to the window without a project folder,

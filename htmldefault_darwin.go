@@ -8,6 +8,7 @@ package main
 #include <CoreFoundation/CoreFoundation.h>
 #include <CoreServices/CoreServices.h>
 #include <stdlib.h>
+#include <string.h>
 #import <Foundation/Foundation.h>
 #import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 
@@ -20,6 +21,17 @@ static CFStringRef tedUTIForExt(const char *ext) {
 		}
 		return CFRetain((__bridge CFStringRef)t.identifier);
 	}
+}
+
+// tedRegister asks LaunchServices to re-read the app bundle at path.
+static OSStatus tedRegister(const char *path) {
+	CFURLRef u = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8 *)path, strlen(path), true);
+	if (u == NULL) {
+		return -1;
+	}
+	OSStatus st = LSRegisterURL(u, true);
+	CFRelease(u);
+	return st;
 }
 */
 import "C"
@@ -142,3 +154,13 @@ func setHTMLDefault(on bool) error {
 
 // htmlDefaultIsTed reports whether ted is the default app for HTML files.
 func htmlDefaultIsTed() bool { return defaultIsTed(htmlUTI) }
+
+// lsRegister makes macOS re-read the app bundle at path, file types included.
+func lsRegister(path string) error {
+	cs := C.CString(path)
+	defer C.free(unsafe.Pointer(cs))
+	if st := C.tedRegister(cs); st != 0 {
+		return fmt.Errorf("LaunchServices could not register %s (status %d)", path, st)
+	}
+	return nil
+}
