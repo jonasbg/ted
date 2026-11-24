@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"unicode/utf8"
 
 	"gioui.org/io/clipboard"
 	"gioui.org/io/event"
@@ -19,24 +20,58 @@ var isMac = runtime.GOOS == "darwin"
 
 const allMods = key.ModCtrl | key.ModCommand | key.ModShift | key.ModAlt | key.ModSuper
 
+// isAltChord reports whether e is an Alt/Option shortcut ted binds whose
+// key would otherwise also type a character on macOS.
+func isAltChord(e key.Event) bool {
+	m := e.Modifiers
+	if !m.Contain(key.ModAlt) || m.Contain(key.ModShortcut) {
+		return false
+	}
+	shift := m.Contain(key.ModShift)
+	return e.Name == "R" && !shift || e.Name == "F" && shift
+}
+
 func (a *App) handleKeys(gtx layout.Context) {
 	filters := []event.Filter{
 		key.FocusFilter{Target: &a.keyTag},
 		key.Filter{Focus: &a.keyTag, Name: "", Optional: allMods},
 		transfer.TargetFilter{Target: &a.keyTag, Type: "application/text"},
 	}
+	// On macOS an Option chord is typed as text (Option+Shift+F gives "Ï")
+	// before its key event arrives. Hold each one-character edit until the
+	// next event, and drop it when that turns out to be a chord ted handles.
+	var held *key.EditEvent
+	flush := func() {
+		if held != nil {
+			e := *held
+			held = nil
+			a.onEdit(e)
+		}
+	}
+	defer flush()
 	for {
 		ev, ok := gtx.Event(filters...)
 		if !ok {
 			break
 		}
 		a.blinkStart = gtx.Now
+		if ke, isKey := ev.(key.Event); isKey && held != nil && ke.State == key.Press && isAltChord(ke) {
+			held = nil
+		}
+		if _, isEdit := ev.(key.EditEvent); !isEdit {
+			flush()
+		}
 		switch e := ev.(type) {
 		case key.Event:
 			if e.State == key.Press {
 				a.onKey(gtx, e)
 			}
 		case key.EditEvent:
+			flush()
+			if utf8.RuneCountInString(e.Text) == 1 && e.Text != "\n" && e.Text != "\r" && e.Text != "\t" {
+				held = &e
+				continue
+			}
 			a.onEdit(e)
 		case key.SelectionEvent:
 			if b := a.buf(); b != nil && a.focus == focusEditor && a.overlay == nil {
@@ -206,6 +241,9 @@ func (a *App) onKey(gtx layout.Context, e key.Event) {
 		return
 	case sc && (e.Name == "H" || (e.Name == "F" && alt)):
 		a.openFind(true)
+		return
+	case e.Name == "F" && alt && shift && !sc && a.focus != focusFind:
+		a.formatJSON(b)
 		return
 	case e.Name == "G" && ctrl && (isMac || !shift):
 		a.gotoLinePrompt()

@@ -19,6 +19,10 @@ func (a *App) statusClick(id string) {
 	switch id {
 	case "md":
 		a.toggleMarkdownPreview()
+	case "fmt":
+		a.formatJSON(b)
+	case "jsonview":
+		a.toggleJSONView(b)
 	case "pos":
 		a.gotoLinePrompt()
 	case "csv":

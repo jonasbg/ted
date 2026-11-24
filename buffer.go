@@ -46,6 +46,9 @@ type undoGroup struct {
 	edits []edit
 	when  time.Time
 	kind  string // "type", "del", or "" (never merges)
+	// the decoded base64 regions before and after this group, so undo
+	// and redo put them back with the text
+	before, after []b64Span
 }
 
 // Buffer holds one open file.
@@ -95,6 +98,13 @@ type Buffer struct {
 	csv     *csvState  // set for delimited files (rainbow columns)
 	md      *mdState   // Markdown preview, once opened
 	image   *imageView // set for image files, shown instead of text
+	b64     []b64Span  // base64 decoded in place (Cmd/Ctrl+click)
+	// jsonView: minified JSON on disk, shown formatted (not an edit).
+	// jsonRaw: the user asked to see this file as it is on disk.
+	jsonView, jsonRaw bool
+	spansPending      []b64Span // decoded regions before the edit in progress
+	spansNoted        bool
+	inUndo            bool
 }
 
 func newBuffer(path string) *Buffer {
@@ -129,7 +139,13 @@ func loadBuffer(path string) (*Buffer, error) {
 	if bytes.IndexByte(head, 0) >= 0 {
 		return nil, errBinary
 	}
-	b.setContent(data)
+	if out, ok := structuredJSON(path, string(data), defaultIndent(path)); ok {
+		crlf := bytes.Contains(data, []byte("\r\n"))
+		b.setContent([]byte(out))
+		b.crlf, b.jsonView = crlf, true
+	} else {
+		b.setContent(data)
+	}
 	b.mode = st.Mode().Perm()
 	b.modTime = st.ModTime()
 	b.size = st.Size()
@@ -215,6 +231,13 @@ func (b *Buffer) save() error {
 	if b.path == "" {
 		return errors.New("no file name")
 	}
+	if b.jsonView && !b.dirty() && !b.diskGone {
+		if st, err := os.Stat(b.path); err == nil && st.ModTime().Equal(b.modTime) && st.Size() == b.size {
+			return nil // only the view is formatted; the file is unchanged
+		}
+	}
+	b.encodeAllSpans()
+	b.jsonView = false // edited: the formatted text is what gets saved
 	data := b.text()
 	if b.crlf {
 		data = strings.ReplaceAll(data, "\n", "\r\n")
@@ -281,6 +304,7 @@ func (b *Buffer) clamp(p Pos) Pos {
 
 // rawInsert inserts text at p and returns the end position.
 func (b *Buffer) rawInsert(p Pos, text []rune) Pos {
+	b.noteSpans()
 	b.version++
 	line := b.lines[p.L]
 	tail := append([]rune(nil), line[p.C:]...)
@@ -299,7 +323,9 @@ func (b *Buffer) rawInsert(p Pos, text []rune) Pos {
 		nl = append(append(append(nl, head...), text...), tail...)
 		b.lines[p.L] = nl
 		b.updateWidths(p.L, 1, 1)
-		return Pos{p.L, p.C + len(text)}
+		end := Pos{p.L, p.C + len(text)}
+		b.shiftB64Insert(p, end)
+		return end
 	}
 	newLines := make([][]rune, len(segs))
 	newLines[0] = append(append([]rune(nil), head...), segs[0]...)
@@ -311,7 +337,9 @@ func (b *Buffer) rawInsert(p Pos, text []rune) Pos {
 	b.hl.spliceLines(p.L+1, 0, len(segs)-1)
 	b.lines = slices.Replace(b.lines, p.L, p.L+1, newLines...)
 	b.updateWidths(p.L, 1, len(newLines))
-	return Pos{p.L + len(segs) - 1, len(last)}
+	end := Pos{p.L + len(segs) - 1, len(last)}
+	b.shiftB64Insert(p, end)
+	return end
 }
 
 func (b *Buffer) textRange(a, c Pos) []rune {
@@ -333,7 +361,11 @@ func (b *Buffer) textRange(a, c Pos) []rune {
 func (b *Buffer) rawDelete(a, c Pos) []rune {
 	a, c = orderPos(a, c)
 	removed := b.textRange(a, c)
+	b.noteSpans()
 	b.version++
+	if len(b.b64) > 0 {
+		b.shiftB64Delete(a, c)
+	}
 	head := b.lines[a.L][:a.C]
 	tail := b.lines[c.L][c.C:]
 	nl := make([]rune, 0, len(head)+len(tail))
@@ -361,12 +393,13 @@ func (b *Buffer) pushEdit(e edit, kind string) {
 			if last.curA == e.curB {
 				g.edits = append(g.edits, e)
 				g.when = now
+				b.spansNoted = false
 				return
 			}
 		}
 	}
 	b.nextID++
-	b.undo = append(b.undo, undoGroup{id: b.nextID, edits: []edit{e}, when: now, kind: kind})
+	b.undo = append(b.undo, undoGroup{id: b.nextID, edits: []edit{e}, when: now, kind: kind, before: b.takeSpans()})
 }
 
 // breakUndo makes the next edit start a new undo group.
@@ -428,7 +461,7 @@ func (b *Buffer) replaceRange(a, c Pos, text []rune) Pos {
 	if len(g) > 0 {
 		b.redo = nil
 		b.nextID++
-		b.undo = append(b.undo, undoGroup{id: b.nextID, edits: g, when: time.Now()})
+		b.undo = append(b.undo, undoGroup{id: b.nextID, edits: g, when: time.Now(), before: b.takeSpans()})
 	}
 	return end
 }
@@ -441,7 +474,7 @@ func (b *Buffer) groupSince(n int) {
 		}
 		return
 	}
-	merged := undoGroup{id: b.undo[len(b.undo)-1].id, when: time.Now()}
+	merged := undoGroup{id: b.undo[len(b.undo)-1].id, when: time.Now(), before: b.undo[n].before}
 	for _, g := range b.undo[n:] {
 		merged.edits = append(merged.edits, g.edits...)
 	}
@@ -452,7 +485,10 @@ func (b *Buffer) doUndo() bool {
 	if len(b.undo) == 0 {
 		return false
 	}
+	b.undo[len(b.undo)-1].after = slices.Clone(b.b64)
 	g := b.undo[len(b.undo)-1]
+	b.inUndo = true
+	defer func() { b.inUndo = false; b.b64 = slices.Clone(g.before) }()
 	b.undo = b.undo[:len(b.undo)-1]
 	for i := len(g.edits) - 1; i >= 0; i-- {
 		e := g.edits[i]
@@ -474,6 +510,8 @@ func (b *Buffer) doRedo() bool {
 		return false
 	}
 	g := b.redo[len(b.redo)-1]
+	b.inUndo = true
+	defer func() { b.inUndo = false; b.b64 = slices.Clone(g.after) }()
 	b.redo = b.redo[:len(b.redo)-1]
 	for _, e := range g.edits {
 		if e.kind == editInsert {
@@ -488,6 +526,22 @@ func (b *Buffer) doRedo() bool {
 	b.selecting = false
 	b.cur = b.clamp(b.cur)
 	return true
+}
+
+// noteSpans remembers the decoded regions before the first raw change of
+// an edit; the undo group the edit makes takes them as its "before".
+func (b *Buffer) noteSpans() {
+	if b.inUndo || b.spansNoted {
+		return
+	}
+	b.spansPending = slices.Clone(b.b64)
+	b.spansNoted = true
+}
+
+func (b *Buffer) takeSpans() []b64Span {
+	s := b.spansPending
+	b.spansPending, b.spansNoted = nil, false
+	return s
 }
 
 func endOf(p Pos, text []rune) Pos {
@@ -543,28 +597,50 @@ func (b *Buffer) reloadFromDisk() error {
 	if crlf {
 		s = strings.ReplaceAll(s, "\r\n", "\n")
 	}
-	oldT := []rune(b.text())
-	newT := []rune(s)
 	b.crlf = crlf
 	b.modTime, b.size = st.ModTime(), st.Size()
 	b.conflict, b.diskGone = false, false
+	if !b.jsonRaw {
+		if out, ok := structuredJSON(b.path, s, b.indent); ok {
+			s = out
+		}
+	}
+	b.jsonView = s != strings.ReplaceAll(string(data), "\r\n", "\n")
+	b.replaceAllMinimal(s)
+	b.savedID = b.topID()
+	return nil
+}
+
+// replaceAllMinimal makes the buffer hold newT by replacing only the region
+// that differs, as one undo step, keeping the cursor on unchanged content.
+// It reports whether anything changed.
+//
+// The common ends are found on bytes; only the middle becomes runes.
+func (b *Buffer) replaceAllMinimal(newS string) bool {
+	oldS := b.text()
+	if oldS == newS {
+		return false
+	}
 	pre := 0
-	for pre < len(oldT) && pre < len(newT) && oldT[pre] == newT[pre] {
+	for pre < len(oldS) && pre < len(newS) && oldS[pre] == newS[pre] {
 		pre++
 	}
-	if pre == len(oldT) && pre == len(newT) {
-		b.savedID = b.topID()
-		return nil
+	for pre > 0 && (pre < len(oldS) && !utf8.RuneStart(oldS[pre]) || pre < len(newS) && !utf8.RuneStart(newS[pre])) {
+		pre--
 	}
 	suf := 0
-	for suf < len(oldT)-pre && suf < len(newT)-pre && oldT[len(oldT)-1-suf] == newT[len(newT)-1-suf] {
+	for suf < len(oldS)-pre && suf < len(newS)-pre && oldS[len(oldS)-1-suf] == newS[len(newS)-1-suf] {
 		suf++
 	}
-	a := b.posFromOffset(pre)
-	c := b.posFromOffset(len(oldT) - suf)
+	for suf > 0 && !utf8.RuneStart(oldS[len(oldS)-suf]) {
+		suf--
+	}
+	preR := utf8.RuneCountInString(oldS[:pre])
+	a := b.posFromOffset(preR)
+	c := b.posFromOffset(preR + utf8.RuneCountInString(oldS[pre:len(oldS)-suf]))
 	cur := b.cur
 	oldLines := len(b.lines)
-	end := b.replaceRange(a, c, newT[pre:len(newT)-suf])
+	end := b.replaceRange(a, c, []rune(newS[pre:len(newS)-suf]))
 	b.breakUndo()
 	// Keep the cursor stable relative to unchanged content.
 	switch {
@@ -579,8 +655,7 @@ func (b *Buffer) reloadFromDisk() error {
 	}
 	b.cur = b.clamp(b.cur)
 	b.selecting = false
-	b.savedID = b.topID()
-	return nil
+	return true
 }
 
 func (b *Buffer) posFromOffset(off int) Pos {

@@ -210,6 +210,7 @@ func (a *App) open(path string, line, col int, preview bool) bool {
 			a.active = i
 			a.focus = focusEditor
 			if line > 0 {
+				b.diskLines()
 				a.gotoPos(b, line, col)
 			}
 			a.tree.reveal(path)
@@ -246,6 +247,7 @@ func (a *App) open(path string, line, col int, preview bool) bool {
 		}
 	}
 	if line > 0 {
+		b.diskLines()
 		a.gotoPos(b, line, col)
 	}
 	a.tree.reveal(path)
@@ -401,11 +403,16 @@ func (a *App) saveBuffer(b *Buffer, then func()) {
 		})
 		return
 	}
+	decoded := len(b.b64) > 0
 	if err := b.save(); err != nil {
 		a.setErr("Save failed: %v", err)
 		return
 	}
-	a.setMsg("Saved %s", a.rel(b.path))
+	if decoded {
+		a.setMsg("Saved %s (decoded base64 was encoded again first)", a.rel(b.path))
+	} else {
+		a.setMsg("Saved %s", a.rel(b.path))
+	}
 	a.tree.refresh()
 	a.refreshGit()
 	if then != nil {

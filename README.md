@@ -49,6 +49,20 @@ there instead of starting another window.
   blocks are shown as source. A web link on a line of its own becomes a card
   with the page's title, description and image (Open Graph), and remote
   images load too; Settings turns both off, since they contact those sites.
+- JSON formatting: Alt+Shift+F, or "Format" in the status bar, re-indents
+  the file with its indentation setting as one undoable edit. Key order and
+  the spelling of strings and numbers are kept. Invalid JSON is left alone
+  and the caret jumps to the error. Minified JSON opens formatted, also after
+  it changes on disk. That is only how it is shown: the tab stays clean and
+  the file stays minified unless you edit and save. Click "Formatted view" in
+  the status bar to see the file as it is on disk.
+- Base64 in any file: Cmd/Ctrl+click a base64 string to decode it in place
+  (JSON comes out formatted, and a JWT decodes one segment at a time). The
+  decoded text is shaded; Cmd/Ctrl+click it again to encode it back. Unedited
+  text gets the original string back, and edits are encoded with the same
+  alphabet and padding. Saving encodes decoded text back first, so the file
+  never holds it. Images and other binary data stay encoded, and the status
+  bar names what they are.
 - Images (PNG, JPEG, GIF, WebP) open in a tab, fitted to the window over a
   checkerboard, with size and dimensions in the status bar. They reload when
   the file changes, so you can watch images an agent or script writes.
