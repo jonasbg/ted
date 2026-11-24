@@ -3,6 +3,7 @@ package main
 import (
 	"image"
 	"image/color"
+	"os"
 
 	"gioui.org/f32"
 	"gioui.org/font"
@@ -11,6 +12,7 @@ import (
 	"gioui.org/op/clip"
 	"gioui.org/op/paint"
 	"gioui.org/text"
+	"github.com/go-text/typesetting/fontscan"
 	"golang.org/x/image/math/fixed"
 )
 
@@ -59,6 +61,7 @@ func monoFace(st tokStyle) face {
 // reusable macros, so redrawing a frame is just replaying cached ops.
 type textCache struct {
 	sh     *text.Shaper
+	ready  chan struct{} // closed once sh is built and warmed
 	m      map[textKey]*textEntry
 	glyphs []text.Glyph
 	met    map[[2]int][2]int
@@ -76,9 +79,55 @@ type textEntry struct {
 	ops  *op.Ops
 }
 
+// newTextCache builds the shaper in the background: parsing the bundled
+// fonts, indexing the system fonts and loading the faces in use takes longer
+// than creating the window, so the two overlap instead of adding up.
 func newTextCache() *textCache {
-	sh := text.NewShaper(text.WithCollection(gofont.Collection()))
-	return &textCache{sh: sh, m: map[textKey]*textEntry{}, met: map[[2]int][2]int{}}
+	c := &textCache{m: map[textKey]*textEntry{}, met: map[[2]int][2]int{}, ready: make(chan struct{})}
+	fonts := faceFonts // useOmarchyFont has already run
+	go func() {
+		// Index the system fonts while the bundled ones are parsed; the
+		// index is process-wide, so NewShaper below reuses it.
+		indexed := make(chan struct{})
+		go func() {
+			if dir, err := os.UserCacheDir(); err == nil {
+				fontscan.NewFontMap(quietLog{}).UseSystemFonts(dir)
+			}
+			close(indexed)
+		}()
+		coll := gofont.Collection()
+		<-indexed
+		sh := text.NewShaper(text.WithCollection(coll))
+		for _, f := range fonts {
+			sh.LayoutString(text.Parameters{Font: f, PxPerEm: fixed.I(16), MaxLines: 1, MaxWidth: 1 << 24}, "Mg")
+			for _, ok := sh.NextGlyph(); ok; _, ok = sh.NextGlyph() {
+			}
+		}
+		c.sh = sh
+		close(c.ready)
+	}()
+	return c
+}
+
+// isReady reports whether the shaper is built, without waiting.
+func (c *textCache) isReady() bool {
+	select {
+	case <-c.ready:
+		return true
+	default:
+		return false
+	}
+}
+
+// quietLog drops fontscan's diagnostics, as gio does unless debugging.
+type quietLog struct{}
+
+func (quietLog) Printf(string, ...any) {}
+
+// shaper returns the shaper, waiting for newTextCache to finish building it.
+func (c *textCache) shaper() *text.Shaper {
+	<-c.ready
+	return c.sh
 }
 
 func (c *textCache) get(f face, px int, s string) *textEntry {
@@ -89,7 +138,8 @@ func (c *textCache) get(f face, px int, s string) *textEntry {
 	if len(c.m) > 12000 {
 		c.m = map[textKey]*textEntry{}
 	}
-	c.sh.LayoutString(text.Parameters{
+	sh := c.shaper()
+	sh.LayoutString(text.Parameters{
 		Font:     faceFonts[f],
 		PxPerEm:  fixed.I(px),
 		MaxLines: 1,
@@ -97,7 +147,7 @@ func (c *textCache) get(f face, px int, s string) *textEntry {
 	}, s)
 	c.glyphs = c.glyphs[:0]
 	var adv fixed.Int26_6
-	for g, ok := c.sh.NextGlyph(); ok; g, ok = c.sh.NextGlyph() {
+	for g, ok := sh.NextGlyph(); ok; g, ok = sh.NextGlyph() {
 		c.glyphs = append(c.glyphs, g)
 		adv += g.Advance
 	}
@@ -106,11 +156,11 @@ func (c *textCache) get(f face, px int, s string) *textEntry {
 	if len(c.glyphs) > 0 {
 		g0 := c.glyphs[0]
 		t := op.Affine(f32.AffineId().Offset(f32.Pt(float32(g0.X)/64, 0))).Push(e.ops)
-		path := c.sh.Shape(c.glyphs)
+		path := sh.Shape(c.glyphs)
 		cl := clip.Outline{Path: path}.Op().Push(e.ops)
 		paint.PaintOp{}.Add(e.ops)
 		cl.Pop()
-		if bm := c.sh.Bitmaps(c.glyphs); bm != (op.CallOp{}) {
+		if bm := sh.Bitmaps(c.glyphs); bm != (op.CallOp{}) {
 			bm.Add(e.ops)
 		}
 		t.Pop()
@@ -146,11 +196,12 @@ func (c *textCache) metrics(f face, px int) (int, int) {
 	if m, ok := c.met[k]; ok {
 		return m[0], m[1]
 	}
-	c.sh.LayoutString(text.Parameters{Font: faceFonts[f], PxPerEm: fixed.I(px), MaxLines: 1, MaxWidth: 1 << 24}, "Mg")
+	sh := c.shaper()
+	sh.LayoutString(text.Parameters{Font: faceFonts[f], PxPerEm: fixed.I(px), MaxLines: 1, MaxWidth: 1 << 24}, "Mg")
 	asc, desc := px, px/4
-	if g, ok := c.sh.NextGlyph(); ok {
+	if g, ok := sh.NextGlyph(); ok {
 		asc, desc = g.Ascent.Ceil(), g.Descent.Ceil()
-		for _, ok := c.sh.NextGlyph(); ok; _, ok = c.sh.NextGlyph() {
+		for _, ok := sh.NextGlyph(); ok; _, ok = sh.NextGlyph() {
 		}
 	}
 	c.met[k] = [2]int{asc, desc}

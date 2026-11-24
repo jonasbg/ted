@@ -16,6 +16,7 @@ import (
 
 	"gioui.org/app"
 	"gioui.org/op"
+	"gioui.org/op/paint"
 	"gioui.org/unit"
 )
 
@@ -65,7 +66,7 @@ func main() {
 	nativeTB := flag.Bool("native-titlebar", false, "keep the standard macOS title bar")
 	newWin := flag.Bool("new", false, "open a new window")
 	flag.BoolVar(newWin, "n", false, "open a new window")
-	flag.Bool("launcher", false, "desktop launcher invocation")
+	launcher := flag.Bool("launcher", false, "desktop launcher invocation")
 	setHTML := flag.Bool("set-html-default", false, "make ted the default app for HTML files (macOS)")
 	unsetHTML := flag.Bool("unset-html-default", false, "restore Safari as the default app for HTML files (macOS)")
 	flag.CommandLine.Parse(launchArgs(os.Args[1:]))
@@ -102,7 +103,9 @@ func main() {
 	if !*wait && !*newWin && !fg && sendToRunning(root, targets) {
 		return
 	}
-	if !*wait && !fg {
+	// A desktop launcher already runs ted in the background, so skip the
+	// re-exec (it would pay process startup a second time).
+	if !*wait && !fg && !*launcher {
 		detach()
 		return
 	}
@@ -227,6 +230,7 @@ func openWindow(root string, targets []target) *App {
 
 func (a *App) loop() error {
 	var ops op.Ops
+	waiting := false // for the fonts, see FrameEvent
 	for {
 		switch e := a.w.Event().(type) {
 		case app.DestroyEvent:
@@ -240,6 +244,18 @@ func (a *App) loop() error {
 			a.focused = e.Config.Focused
 		case app.FrameEvent:
 			gtx := app.NewContext(&ops, e)
+			if !a.tc.isReady() {
+				// The first Frame call creates the GL context and compiles
+				// shaders; do that now with a plain background while the
+				// fonts finish loading, then draw for real.
+				paint.Fill(gtx.Ops, a.th.bg)
+				e.Frame(gtx.Ops)
+				if !waiting {
+					waiting = true
+					go func() { <-a.tc.ready; a.w.Invalidate() }()
+				}
+				continue
+			}
 			a.frame(gtx)
 			e.Frame(gtx.Ops)
 		default:
