@@ -1282,6 +1282,7 @@ func helpRows() [][2]string {
 		{"JSON", ""},
 		{"Alt+Shift+F", "Format (or \"Format\" in the status bar; undoable)"},
 		{"Minified files", "Open formatted; \"Formatted view\" in the status bar shows the file as on disk"},
+		{"Pasted JSON", "Recognised and formatted; picking JSON as the language formats too"},
 		{"Base64", ""},
 		{c + "+click", "Decode base64 in place; " + c + "+click the shaded text to encode it again"},
 		{"Markdown", ""},

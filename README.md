@@ -55,7 +55,12 @@ there instead of starting another window.
   and the caret jumps to the error. Minified JSON opens formatted, also after
   it changes on disk. That is only how it is shown: the tab stays clean and
   the file stays minified unless you edit and save. Click "Formatted view" in
-  the status bar to see the file as it is on disk.
+  the status bar to see the file as it is on disk. JSON is also recognised
+  by its content: in a scratch buffer (pasted JSON is formatted as one
+  undoable edit) and in files whose name says nothing, such as `response` or
+  `dump.txt`. Picking JSON as the language formats the file. Large files that
+  change on disk are read and formatted in the background, so the window
+  keeps responding.
 - Base64 in any file: Cmd/Ctrl+click a base64 string to decode it in place
   (JSON comes out formatted, and a JWT decodes one segment at a time). The
   decoded text is shaded; Cmd/Ctrl+click it again to encode it back. Unedited

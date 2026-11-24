@@ -6,6 +6,7 @@ import (
 	"image"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -552,10 +553,47 @@ func (a *App) checkDisk() {
 			}
 			continue
 		}
+		if st.Size() > asyncReloadSize {
+			a.reloadInBackground(b)
+			continue
+		}
 		if err := b.reloadFromDisk(); err == nil && b == a.buf() {
 			a.setMsg("%s changed on disk and was reloaded (undo restores the previous text)", b.name())
 		}
 	}
+}
+
+// Files larger than this reload off the UI goroutine: reading, formatting
+// minified JSON and finding the changed region take tens of milliseconds.
+const asyncReloadSize = 1 << 20
+
+// reloadInBackground reads, formats and diffs b's file on another goroutine;
+// the UI goroutine only applies the changed region. If b is edited in the
+// meantime the result is dropped, and the next disk check tries again.
+func (a *App) reloadInBackground(b *Buffer) {
+	if b.reloading {
+		return
+	}
+	b.reloading = true
+	path, raw, indent := b.path, b.jsonRaw, b.indent
+	lines, ver := slices.Clone(b.lines), b.version
+	go func() {
+		d, err := readDiskText(path, raw, indent)
+		var df textDiff
+		if err == nil {
+			df = diffText(textOf(lines), d.s)
+		}
+		a.post(func() {
+			b.reloading = false
+			if err != nil || b.version != ver || b.dirty() || b.path != path || b.jsonRaw != raw || !slices.Contains(a.bufs, b) {
+				return
+			}
+			b.applyDisk(d, df)
+			if b == a.buf() {
+				a.setMsg("%s changed on disk and was reloaded (undo restores the previous text)", b.name())
+			}
+		})
+	}()
 }
 
 func (a *App) startTicker() {
