@@ -113,6 +113,9 @@ func (a *App) statusClick(id string) {
 			}
 			h.version = -1 // re-highlight
 			h.windowed = false
+			if h.lang == "JSON" {
+				a.formatJSON(b) // picking JSON formats it
+			}
 		})
 	}
 }

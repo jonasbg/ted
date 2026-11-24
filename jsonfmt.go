@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/alecthomas/chroma/v2/lexers"
 )
 
 // isJSON reports whether the buffer holds a JSON file, by extension or, for
@@ -125,6 +127,71 @@ func (a *App) formatJSON(b *Buffer) {
 	a.setMsg("Formatted JSON (%s to undo)", shortcutName()+"+Z")
 }
 
+// jsonCandidate reports whether a file may hold JSON worth checking: a JSON
+// name, or a name no language claims (no extension, .txt, .log, .out, .tmp,
+// untitled) with text that starts like JSON.
+func jsonCandidate(path, s string) bool {
+	if isJSONPath(path) {
+		return true
+	}
+	if !unclaimedName(path) {
+		return false
+	}
+	t := strings.TrimLeft(s, " \t\r\n")
+	return t != "" && (t[0] == '{' || t[0] == '[')
+}
+
+func unclaimedName(path string) bool {
+	if path == "" {
+		return true
+	}
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".txt", ".log", ".out", ".tmp", ".response", ".body":
+		return true
+	}
+	return lexers.Match(filepath.Base(path)) == nil
+}
+
+// looksLikeJSON reports whether the buffer's text is a JSON object or array
+// though its name does not say so: a scratch buffer, or a file such as
+// "response" or "dump.txt".
+func (b *Buffer) looksLikeJSON() bool {
+	if b.image != nil || b.virtualKey != "" || isJSONPath(b.path) || !unclaimedName(b.path) {
+		return false
+	}
+	first := ""
+	for _, l := range b.lines {
+		if t := strings.TrimSpace(string(l)); t != "" {
+			first = t
+			break
+		}
+	}
+	if first == "" || first[0] != '{' && first[0] != '[' {
+		return false
+	}
+	t := b.text()
+	return len(t) <= 64<<20 && json.Valid([]byte(t))
+}
+
+// autoFormatJSON formats a scratch buffer just recognised as JSON, when the
+// JSON was pasted or restored rather than typed, as one undoable edit.
+// Files on disk get the formatted view on open instead.
+func (b *Buffer) autoFormatJSON() {
+	if b.path != "" || b.readOnly || b.hl.manual {
+		return
+	}
+	if n := len(b.undo); n > 0 && (b.undo[n-1].kind == "type" || b.undo[n-1].kind == "del") {
+		return
+	}
+	// the text's own indentation, else JSON's usual two spaces
+	indent := detectIndent(b.lines, "untitled.json")
+	if out, err := prettyJSON(b.text(), indent); err == nil {
+		b.indent = indent
+		b.replaceAllMinimal(out)
+		b.cur, b.selecting = Pos{}, false
+	}
+}
+
 func isJSONPath(path string) bool {
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".json", ".geojson", ".webmanifest", ".har", ".jsonld", ".topojson":
@@ -138,7 +205,7 @@ func isJSONPath(path string) bool {
 // formatting at least doubles its line count. Files laid out by hand (even
 // compactly, or with another indent) are left as they are.
 func structuredJSON(path, s, indent string) (string, bool) {
-	if !isJSONPath(path) || len(s) > 64<<20 || strings.TrimSpace(s) == "" {
+	if path == "" || !jsonCandidate(path, s) || len(s) > 64<<20 || strings.TrimSpace(s) == "" {
 		return "", false
 	}
 	if lines := strings.Count(strings.TrimRight(s, "\r\n"), "\n") + 1; lines > 3 && len(s)/lines < 300 {

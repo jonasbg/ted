@@ -105,6 +105,7 @@ type Buffer struct {
 	spansPending      []b64Span // decoded regions before the edit in progress
 	spansNoted        bool
 	inUndo            bool
+	reloading         bool // a large file is being read in the background
 }
 
 func newBuffer(path string) *Buffer {
@@ -139,7 +140,7 @@ func loadBuffer(path string) (*Buffer, error) {
 	if bytes.IndexByte(head, 0) >= 0 {
 		return nil, errBinary
 	}
-	if out, ok := structuredJSON(path, string(data), defaultIndent(path)); ok {
+	if out, ok := structuredJSON(path, string(data), "  "); ok {
 		crlf := bytes.Contains(data, []byte("\r\n"))
 		b.setContent([]byte(out))
 		b.crlf, b.jsonView = crlf, true
@@ -174,9 +175,14 @@ func splitLines(s string) [][]rune {
 	return lines
 }
 
-func (b *Buffer) text() string {
-	n := max(0, len(b.lines)-1)
-	for _, line := range b.lines {
+func (b *Buffer) text() string { return textOf(b.lines) }
+
+// textOf joins lines with newlines. Edits replace a line's slice rather
+// than write into it, so a copy of b.lines can be read on another
+// goroutine while the buffer changes.
+func textOf(lines [][]rune) string {
+	n := max(0, len(lines)-1)
+	for _, line := range lines {
 		for _, r := range line {
 			switch l := utf8.RuneLen(r); {
 			case r < utf8.RuneSelf:
@@ -192,7 +198,7 @@ func (b *Buffer) text() string {
 		return ""
 	}
 	buf := make([]byte, 0, n)
-	for i, line := range b.lines {
+	for i, line := range lines {
 		if i > 0 {
 			buf = append(buf, '\n')
 		}
@@ -584,42 +590,70 @@ func (b *Buffer) deleteSel() {
 // edit covering only the changed region, so the cursor stays put and the
 // change can be undone with Ctrl+Z.
 func (b *Buffer) reloadFromDisk() error {
-	data, err := os.ReadFile(b.path)
+	d, err := readDiskText(b.path, b.jsonRaw, b.indent)
 	if err != nil {
 		return err
 	}
-	st, err := os.Stat(b.path)
-	if err != nil {
-		return err
-	}
-	s := string(data)
-	crlf := strings.Contains(s, "\r\n")
-	if crlf {
-		s = strings.ReplaceAll(s, "\r\n", "\n")
-	}
-	b.crlf = crlf
-	b.modTime, b.size = st.ModTime(), st.Size()
-	b.conflict, b.diskGone = false, false
-	if !b.jsonRaw {
-		if out, ok := structuredJSON(b.path, s, b.indent); ok {
-			s = out
-		}
-	}
-	b.jsonView = s != strings.ReplaceAll(string(data), "\r\n", "\n")
-	b.replaceAllMinimal(s)
-	b.savedID = b.topID()
+	b.applyDisk(d, diffText(b.text(), d.s))
 	return nil
 }
 
-// replaceAllMinimal makes the buffer hold newT by replacing only the region
-// that differs, as one undo step, keeping the cursor on unchanged content.
-// It reports whether anything changed.
-//
-// The common ends are found on bytes; only the middle becomes runes.
-func (b *Buffer) replaceAllMinimal(newS string) bool {
-	oldS := b.text()
+// diskText is a file as the buffer will show it, read without touching the
+// buffer so a large file can be read, formatted and diffed off the UI
+// goroutine.
+type diskText struct {
+	s       string // text to show: LF line endings, minified JSON formatted
+	crlf    bool
+	view    bool // s is a formatted view of minified JSON
+	modTime time.Time
+	size    int64
+}
+
+func readDiskText(path string, jsonRaw bool, indent string) (diskText, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return diskText{}, err
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		return diskText{}, err
+	}
+	d := diskText{s: string(data), modTime: st.ModTime(), size: st.Size()}
+	if d.crlf = strings.Contains(d.s, "\r\n"); d.crlf {
+		d.s = strings.ReplaceAll(d.s, "\r\n", "\n")
+	}
+	if !jsonRaw {
+		if out, ok := structuredJSON(path, d.s, indent); ok {
+			d.s, d.view = out, true
+		}
+	}
+	return d, nil
+}
+
+// applyDisk puts text read by readDiskText into the buffer as one undo
+// step, where df is the difference from the buffer's text when it was read.
+func (b *Buffer) applyDisk(d diskText, df textDiff) {
+	b.crlf = d.crlf
+	b.modTime, b.size = d.modTime, d.size
+	b.conflict, b.diskGone = false, false
+	b.jsonView = d.view
+	b.applyDiff(df)
+	b.savedID = b.topID()
+}
+
+// textDiff is the one region where two texts differ: preR runes in, oldR
+// runes long in the old text, replaced by mid.
+type textDiff struct {
+	same       bool
+	preR, oldR int
+	mid        string
+}
+
+// diffText finds the common ends on bytes; only the middle is counted in
+// runes. It touches no buffer, so it can run on any goroutine.
+func diffText(oldS, newS string) textDiff {
 	if oldS == newS {
-		return false
+		return textDiff{same: true}
 	}
 	pre := 0
 	for pre < len(oldS) && pre < len(newS) && oldS[pre] == newS[pre] {
@@ -635,12 +669,29 @@ func (b *Buffer) replaceAllMinimal(newS string) bool {
 	for suf > 0 && !utf8.RuneStart(oldS[len(oldS)-suf]) {
 		suf--
 	}
-	preR := utf8.RuneCountInString(oldS[:pre])
-	a := b.posFromOffset(preR)
-	c := b.posFromOffset(preR + utf8.RuneCountInString(oldS[pre:len(oldS)-suf]))
+	return textDiff{
+		preR: utf8.RuneCountInString(oldS[:pre]),
+		oldR: utf8.RuneCountInString(oldS[pre : len(oldS)-suf]),
+		mid:  newS[pre : len(newS)-suf],
+	}
+}
+
+// replaceAllMinimal makes the buffer hold newS by replacing only the region
+// that differs, as one undo step, keeping the cursor on unchanged content.
+// It reports whether anything changed.
+func (b *Buffer) replaceAllMinimal(newS string) bool {
+	return b.applyDiff(diffText(b.text(), newS))
+}
+
+func (b *Buffer) applyDiff(df textDiff) bool {
+	if df.same {
+		return false
+	}
+	a := b.posFromOffset(df.preR)
+	c := b.posFromOffset(df.preR + df.oldR)
 	cur := b.cur
 	oldLines := len(b.lines)
-	end := b.replaceRange(a, c, []rune(newS[pre:len(newS)-suf]))
+	end := b.replaceRange(a, c, []rune(df.mid))
 	b.breakUndo()
 	// Keep the cursor stable relative to unchanged content.
 	switch {

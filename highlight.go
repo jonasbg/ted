@@ -259,6 +259,11 @@ func (b *Buffer) resolveLexer() {
 		b.setCSV(d)
 		return
 	}
+	if b.looksLikeJSON() {
+		h.lexer, h.lang = chroma.Coalesce(lexers.Get("json")), "JSON"
+		b.autoFormatJSON()
+		return
+	}
 	h.lexer = lexerFor(b.path, sample)
 	if h.lexer != nil {
 		h.lang = h.lexer.Config().Name
