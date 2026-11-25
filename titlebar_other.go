@@ -25,3 +25,6 @@ func windowOptions(native bool) []app.Option {
 }
 
 func (a *App) setNativeTitle(t string) bool { return false }
+
+// appLaunched is a macOS launch signal; elsewhere it never fires.
+func appLaunched() <-chan struct{} { return nil }
