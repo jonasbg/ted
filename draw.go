@@ -79,9 +79,10 @@ type shaperSet struct {
 }
 
 type textKey struct {
-	s  string
-	f  face
-	px int
+	s    string
+	f    face
+	px   int
+	cell int // >0: glyphs snapped to columns this many pixels wide
 }
 
 type textEntry struct {
@@ -171,7 +172,14 @@ func (c *textCache) shaper() *text.Shaper {
 }
 
 func (c *textCache) get(f face, px int, s string) *textEntry {
-	k := textKey{s, f, px}
+	return c.getCell(f, px, 0, s)
+}
+
+// getCell is get with each rune's glyphs placed at a multiple of cell
+// pixels when cell > 0, so a run lines up with an integer column grid
+// instead of drifting by the font's fractional advance.
+func (c *textCache) getCell(f face, px, cell int, s string) *textEntry {
+	k := textKey{s, f, px, cell}
 	if e, ok := c.m[k]; ok {
 		return e
 	}
@@ -190,6 +198,24 @@ func (c *textCache) get(f face, px int, s string) *textEntry {
 	for g, ok := sh.NextGlyph(); ok; g, ok = sh.NextGlyph() {
 		c.glyphs = append(c.glyphs, g)
 		adv += g.Advance
+	}
+	if cell > 0 && len(c.glyphs) > 0 {
+		// Runes is set on the last glyph of each cluster; every rune here
+		// is one column wide (wide runes are drawn on their own).
+		base, col, start := c.glyphs[0].X, 0, -1
+		var origin fixed.Int26_6
+		for i := range c.glyphs {
+			g := &c.glyphs[i]
+			if start < 0 {
+				start, origin = i, g.X
+			}
+			g.X = base + fixed.I(col*cell) + (g.X - origin)
+			if g.Flags&text.FlagClusterBreak != 0 {
+				col += int(g.Runes)
+				start = -1
+			}
+		}
+		adv = fixed.I(col * cell)
 	}
 	e := &textEntry{adv: adv.Round(), ops: new(op.Ops)}
 	m := op.Record(e.ops)
@@ -216,6 +242,19 @@ func (c *textCache) draw(ops *op.Ops, f face, px, x, baseline int, s string, col
 		return 0
 	}
 	e := c.get(f, px, s)
+	t := op.Offset(image.Pt(x, baseline)).Push(ops)
+	paint.ColorOp{Color: col}.Add(ops)
+	e.call.Add(ops)
+	t.Pop()
+	return e.adv
+}
+
+// drawCell is draw with glyphs snapped to a grid of cell-pixel columns.
+func (c *textCache) drawCell(ops *op.Ops, f face, px, cell, x, baseline int, s string, col color.NRGBA) int {
+	if s == "" {
+		return 0
+	}
+	e := c.getCell(f, px, cell, s)
 	t := op.Offset(image.Pt(x, baseline)).Push(ops)
 	paint.ColorOp{Color: col}.Add(ops)
 	e.call.Add(ops)
