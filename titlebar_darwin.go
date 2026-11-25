@@ -7,6 +7,7 @@ package main
 #cgo LDFLAGS: -framework AppKit
 #import <AppKit/AppKit.h>
 #include <stdlib.h>
+#include <unistd.h>
 
 // tedStyleWindow hides the title bar the way Ghostty and Zed do: the window
 // keeps its traffic lights, but content extends underneath a transparent,
@@ -63,6 +64,17 @@ static void tedStyleWindow(CFTypeRef viewRef, CGFloat barHeight, int tedDebug, C
 	});
 }
 
+// tedObserveLaunch writes a byte to fd when the app finishes launching.
+// AppKit hands over the files it was opened with before that.
+static void tedObserveLaunch(int fd) {
+	[[NSNotificationCenter defaultCenter] addObserverForName:NSApplicationDidFinishLaunchingNotification
+		object:nil queue:nil usingBlock:^(NSNotification *n) {
+			char b = 1;
+			write(fd, &b, 1);
+			close(fd);
+		}];
+}
+
 static void tedSetTitle(CFTypeRef viewRef, const char *title) {
 	NSView *view = (__bridge NSView *)viewRef;
 	NSString *t = [NSString stringWithUTF8String:title];
@@ -75,6 +87,7 @@ import "C"
 
 import (
 	"os"
+	"syscall"
 	"unsafe"
 
 	"gioui.org/app"
@@ -127,4 +140,28 @@ func (a *App) setNativeTitle(t string) bool {
 	defer C.free(unsafe.Pointer(ct))
 	C.tedSetTitle(C.CFTypeRef(a.nativeView), ct)
 	return true
+}
+
+// appLaunched is closed once macOS has finished launching the app, by which
+// time it has delivered any files the app was opened with. Call it before
+// app.Events or app.Main.
+func appLaunched() <-chan struct{} {
+	r, w, err := os.Pipe()
+	if err != nil {
+		return nil
+	}
+	ch := make(chan struct{})
+	go func() {
+		r.Read(make([]byte, 1))
+		r.Close()
+		close(ch)
+	}()
+	// The C side owns the write end from here on.
+	fd, err := syscall.Dup(int(w.Fd()))
+	w.Close()
+	if err != nil {
+		return nil
+	}
+	C.tedObserveLaunch(C.int(fd))
+	return ch
 }

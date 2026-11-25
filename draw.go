@@ -3,7 +3,7 @@ package main
 import (
 	"image"
 	"image/color"
-	"os"
+	"sync"
 
 	"gioui.org/f32"
 	"gioui.org/font"
@@ -12,7 +12,6 @@ import (
 	"gioui.org/op/clip"
 	"gioui.org/op/paint"
 	"gioui.org/text"
-	"github.com/go-text/typesetting/fontscan"
 	"golang.org/x/image/math/fixed"
 )
 
@@ -61,10 +60,22 @@ func monoFace(st tokStyle) face {
 // reusable macros, so redrawing a frame is just replaying cached ops.
 type textCache struct {
 	sh     *text.Shaper
-	ready  chan struct{} // closed once sh is built and warmed
+	fonts  [nFaces]font.Font // what sh is queried with for each face
+	ready  chan struct{}     // closed once sh is built and warmed
 	m      map[textKey]*textEntry
 	glyphs []text.Glyph
 	met    map[[2]int][2]int
+
+	// When sh is the quick shaper (see fonts.go), the full one follows
+	// on next once loadSystemFonts is called.
+	next     chan shaperSet
+	wantFull chan struct{}
+	fullOnce sync.Once
+}
+
+type shaperSet struct {
+	sh    *text.Shaper
+	fonts [nFaces]font.Font
 }
 
 type textKey struct {
@@ -79,34 +90,63 @@ type textEntry struct {
 	ops  *op.Ops
 }
 
-// newTextCache builds the shaper in the background: parsing the bundled
-// fonts, indexing the system fonts and loading the faces in use takes longer
-// than creating the window, so the two overlap instead of adding up.
-func newTextCache() *textCache {
-	c := &textCache{m: map[textKey]*textEntry{}, met: map[[2]int][2]int{}, ready: make(chan struct{})}
+// newTextCache builds the shaper in the background, overlapping window and
+// GPU setup. With the font files remembered from the last run that takes a
+// few milliseconds; otherwise the system fonts are indexed first. invalidate
+// is called when the full shaper is ready to replace the quick one.
+func newTextCache(invalidate func()) *textCache {
+	c := &textCache{
+		m: map[textKey]*textEntry{}, met: map[[2]int][2]int{},
+		ready: make(chan struct{}), next: make(chan shaperSet, 1), wantFull: make(chan struct{}),
+	}
 	fonts := faceFonts // useOmarchyFont has already run
+	c.fonts = fonts
 	go func() {
-		// Index the system fonts while the bundled ones are parsed; the
-		// index is process-wide, so NewShaper below reuses it.
-		indexed := make(chan struct{})
-		go func() {
-			if dir, err := os.UserCacheDir(); err == nil {
-				fontscan.NewFontMap(quietLog{}).UseSystemFonts(dir)
-			}
-			close(indexed)
-		}()
 		coll := gofont.Collection()
-		<-indexed
-		sh := text.NewShaper(text.WithCollection(coll))
-		for _, f := range fonts {
-			sh.LayoutString(text.Parameters{Font: f, PxPerEm: fixed.I(16), MaxLines: 1, MaxWidth: 1 << 24}, "Mg")
-			for _, ok := sh.NextGlyph(); ok; _, ok = sh.NextGlyph() {
-			}
+		var sh *text.Shaper
+		qf := fonts
+		if p, ok := loadFontPicks(fonts); ok {
+			sh, qf = quickShaper(p, fonts, coll)
 		}
-		c.sh = sh
-		close(c.ready)
+		if sh != nil {
+			warmShaper(sh, qf)
+			c.sh, c.fonts = sh, qf
+			close(c.ready)
+			// Index the system fonts once the window is up, so the work
+			// doesn't compete with creating it.
+			<-c.wantFull
+			full := fullShaper(coll)
+			warmShaper(full, fonts)
+			c.next <- shaperSet{full, fonts}
+			invalidate()
+		} else {
+			sh = fullShaper(coll)
+			warmShaper(sh, fonts)
+			c.sh = sh
+			close(c.ready)
+		}
+		saveFontPicks(fonts, coll)
 	}()
 	return c
+}
+
+// loadSystemFonts lets the full shaper load, after the first frame.
+func (c *textCache) loadSystemFonts() {
+	c.fullOnce.Do(func() { close(c.wantFull) })
+}
+
+// upgrade switches to the full shaper if it has arrived, dropping text
+// shaped with the quick one. It reports whether it switched.
+func (c *textCache) upgrade() bool {
+	select {
+	case s := <-c.next:
+		c.sh, c.fonts = s.sh, s.fonts
+		c.m = map[textKey]*textEntry{}
+		c.met = map[[2]int][2]int{}
+		return true
+	default:
+		return false
+	}
 }
 
 // isReady reports whether the shaper is built, without waiting.
@@ -140,7 +180,7 @@ func (c *textCache) get(f face, px int, s string) *textEntry {
 	}
 	sh := c.shaper()
 	sh.LayoutString(text.Parameters{
-		Font:     faceFonts[f],
+		Font:     c.fonts[f],
 		PxPerEm:  fixed.I(px),
 		MaxLines: 1,
 		MaxWidth: 1 << 24,
@@ -197,7 +237,7 @@ func (c *textCache) metrics(f face, px int) (int, int) {
 		return m[0], m[1]
 	}
 	sh := c.shaper()
-	sh.LayoutString(text.Parameters{Font: faceFonts[f], PxPerEm: fixed.I(px), MaxLines: 1, MaxWidth: 1 << 24}, "Mg")
+	sh.LayoutString(text.Parameters{Font: c.fonts[f], PxPerEm: fixed.I(px), MaxLines: 1, MaxWidth: 1 << 24}, "Mg")
 	asc, desc := px, px/4
 	if g, ok := sh.NextGlyph(); ok {
 		asc, desc = g.Ascent.Ceil(), g.Descent.Ceil()

@@ -122,7 +122,11 @@ type App struct {
 
 func newApp(w *app.Window, root string, th *Theme, fontSp float32) *App {
 	a := &App{w: w, th: th, root: root, showSidebar: root != "", sidebarDp: 250, fontSp: fontSp, follow: true}
-	a.tc = newTextCache()
+	a.tc = newTextCache(func() {
+		if a.w != nil {
+			a.w.Invalidate()
+		}
+	})
 	a.tree = newTree(root)
 	if root != "" {
 		a.tree.gitRoot = gitToplevel(root)

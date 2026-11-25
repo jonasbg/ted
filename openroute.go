@@ -8,23 +8,25 @@ import (
 	"time"
 )
 
-// coldLaunchWait is how long a bundle started by Finder waits for the
+// coldLaunchWait is the longest a bundle started by Finder waits for the
 // open-document event before falling back to the last project. macOS sends
-// it right after launch, so this only delays a plain Dock or Spotlight start.
+// it before it finishes launching the app, so normally launched ends the
+// wait well before this.
 const coldLaunchWait = 400 * time.Millisecond
 
 // openRouter decides where files handed to the process (by Finder, the
 // Dock or "Open With") should open. It runs on one goroutine so a batch of
 // files from the same project lands in one window.
 type openRouter struct {
-	paths chan string
+	paths    chan string
+	launched <-chan struct{} // see appLaunched; nil waits the full coldLaunchWait
 	// for tests: how to open a window and reach other ted processes
 	open func(root string, targets []target) *App
 	send func(root string, targets []target) bool
 }
 
 func newOpenRouter() *openRouter {
-	return &openRouter{paths: make(chan string, 64), open: openWindow, send: sendToRunning}
+	return &openRouter{paths: make(chan string, 64), launched: appLaunched(), open: openWindow, send: sendToRunning}
 }
 
 // run opens the initial window, then routes incoming paths forever.
@@ -33,8 +35,21 @@ func (r *openRouter) run(root string, targets []target, coldFinder bool) {
 		// Launched without arguments from an app bundle: if Finder is about
 		// to hand us a file, open the window with it rather than with the
 		// recovered drafts of the last session.
+		p := ""
 		select {
-		case p := <-r.paths:
+		case p = <-r.paths:
+		case <-r.launched:
+			// Files come before the launch finishes, so none is coming
+			// unless one is already queued.
+			select {
+			case p = <-r.paths:
+			default:
+			}
+		case <-time.After(coldLaunchWait):
+		}
+		if p == "" {
+			r.open(root, targets)
+		} else {
 			r.route(p)
 			r.drain()
 			windows.Lock()
@@ -44,8 +59,6 @@ func (r *openRouter) run(root string, targets []target, coldFinder bool) {
 				// every file went to an already running ted
 				os.Exit(0)
 			}
-		case <-time.After(coldLaunchWait):
-			r.open(root, targets)
 		}
 	} else {
 		r.open(root, targets)

@@ -178,6 +178,31 @@ func openWindow(root string, targets []target) *App {
 	a.omarchy, a.themeFixed = om, cfg.explicitTheme
 	a.noSession = cfg.wait
 	a.nativeTitlebar = cfg.nativeTitlebar
+	// Ask for the window now: AppKit takes longer to create it than the
+	// session takes to restore, so the two overlap. The loop handles no
+	// events until setup is closed.
+	setup := make(chan struct{})
+	go func() {
+		err := a.loop(setup)
+		if a.socket != "" {
+			os.Remove(a.socket)
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "ted:", err)
+		}
+		windows.Lock()
+		if windows.byRoot[root] == a {
+			delete(windows.byRoot, root)
+		}
+		last := len(windows.byRoot) == 0
+		windows.Unlock()
+		if last {
+			if err != nil {
+				os.Exit(1)
+			}
+			os.Exit(0)
+		}
+	}()
 	if !a.noSession {
 		a.restoreSession(root, root == "")
 		if root == "" && len(targets) == 0 && len(a.bufs) == 0 {
@@ -204,35 +229,18 @@ func openWindow(root string, targets []target) *App {
 	a.refreshGit()
 	a.loadFiles()
 
-	go func() {
-		err := a.loop()
-		if a.socket != "" {
-			os.Remove(a.socket)
-		}
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "ted:", err)
-		}
-		windows.Lock()
-		if windows.byRoot[root] == a {
-			delete(windows.byRoot, root)
-		}
-		last := len(windows.byRoot) == 0
-		windows.Unlock()
-		if last {
-			if err != nil {
-				os.Exit(1)
-			}
-			os.Exit(0)
-		}
-	}()
+	close(setup)
 	return a
 }
 
-func (a *App) loop() error {
+// loop handles the window's events once setup is closed.
+func (a *App) loop(setup <-chan struct{}) error {
 	var ops op.Ops
 	waiting := false // for the fonts, see FrameEvent
 	for {
-		switch e := a.w.Event().(type) {
+		e := a.w.Event() // the first call creates the window
+		<-setup
+		switch e := e.(type) {
 		case app.DestroyEvent:
 			a.saveSession()
 			return e.Err
@@ -256,8 +264,12 @@ func (a *App) loop() error {
 				}
 				continue
 			}
+			if a.tc.upgrade() {
+				a.webVer++ // lay the Markdown preview out again
+			}
 			a.frame(gtx)
 			e.Frame(gtx.Ops)
+			a.tc.loadSystemFonts()
 		default:
 			a.platformEvent(e)
 		}
