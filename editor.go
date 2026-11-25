@@ -310,7 +310,7 @@ func (a *App) drawLineText(gtx layout.Context, b *Buffer, li int, line []rune, b
 	var segSt tokStyle
 	flush := func() {
 		if len(seg) > 0 {
-			a.tc.draw(ops, monoFace(segSt), u.codePx, colX(segStart), baseline, string(seg), segSt.fg)
+			a.tc.drawCell(ops, monoFace(segSt), u.codePx, u.charW, colX(segStart), baseline, string(seg), segSt.fg)
 		}
 		seg = seg[:0]
 		segStart = -1
