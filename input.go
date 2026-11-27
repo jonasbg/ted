@@ -35,6 +35,9 @@ func (a *App) handleKeys(gtx layout.Context) {
 	filters := []event.Filter{
 		key.FocusFilter{Target: &a.keyTag},
 		key.Filter{Focus: &a.keyTag, Name: "", Optional: allMods},
+		// Gio sends plain Tab and Shift+Tab as system events (for focus
+		// moves), and those only match a filter that names the key.
+		key.Filter{Focus: &a.keyTag, Name: key.NameTab, Optional: allMods},
 		transfer.TargetFilter{Target: &a.keyTag, Type: "application/text"},
 	}
 	// On macOS an Option chord is typed as text (Option+Shift+F gives "Ï")
@@ -561,6 +564,7 @@ func (a *App) onPaste(s string) {
 		a.setMsg("Cell selection cleared; paste goes at the caret")
 	}
 	b.breakUndo()
+	wasEmpty := len(b.lines) == 1 && len(b.lines[0]) == 0
 	if s == a.lineCopy && !b.hasSel() {
 		col := b.cur.C
 		b.cur = Pos{b.cur.L, 0}
@@ -568,6 +572,12 @@ func (a *App) onPaste(s string) {
 		b.cur.C = min(col, len(b.lines[b.cur.L]))
 	} else {
 		b.insert([]rune(s), "")
+	}
+	// Text pasted into an empty buffer sets its indent style, as it would
+	// have when opened from a file. Only indented text says anything about
+	// it, so an indent picked by hand survives other pastes.
+	if wasEmpty && hasIndentedLine(b.lines) {
+		b.indent = detectIndent(b.lines, b.path)
 	}
 	b.breakUndo()
 	a.follow = true

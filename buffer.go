@@ -796,6 +796,15 @@ func detectIndent(lines [][]rune, path string) string {
 	return defaultIndent(path)
 }
 
+func hasIndentedLine(lines [][]rune) bool {
+	for _, l := range lines {
+		if ws := leadingWS(l); len(ws) > 0 && len(ws) < len(l) {
+			return true
+		}
+	}
+	return false
+}
+
 func leadingWS(l []rune) []rune {
 	i := 0
 	for i < len(l) && (l[i] == ' ' || l[i] == '\t') {
