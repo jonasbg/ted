@@ -261,15 +261,10 @@ func (b *Buffer) selectedLines() (int, int) {
 }
 
 func (b *Buffer) indentSel(out bool) {
-	single := !b.hasSel()
-	if !single {
-		s, e := b.selRange()
-		single = s.L == e.L
-	}
-	if !out && single {
-		if b.hasSel() {
-			b.deleteSel()
-		}
+	// With any selection, even inside one line, Tab and Shift+Tab shift the
+	// selected lines. Without one, Tab indents at the caret and Shift+Tab
+	// outdents the caret's line.
+	if !out && !b.hasSel() {
 		if b.indent == "\t" {
 			b.insert([]rune{'\t'}, "type")
 		} else {
@@ -282,6 +277,26 @@ func (b *Buffer) indentSel(out bool) {
 	l0, l1 := b.selectedLines()
 	n := len(b.undo)
 	sel, anc, cur := b.selecting, b.anchor, b.cur
+	// Shift every line by the same amount, worked out from the shallowest
+	// one, so nesting inside the selection survives: Shift+Tab takes that
+	// line back to the previous indent stop, Tab on to the next one.
+	w := len(b.indent)
+	if b.indent == "\t" {
+		w = tabW // space-indented lines in a tab buffer: a tab's width
+	}
+	minSp := -1
+	for l := l0; l <= l1; l++ {
+		line := b.lines[l]
+		if sp := leadingSpaces(line); sp < len(line) && (minSp < 0 || sp < minSp) {
+			minSp = sp // blank lines don't count
+		}
+	}
+	minSp = max(0, minSp)
+	shiftOut := w
+	if minSp > 0 {
+		shiftOut = minSp - (minSp-1)/w*w
+	}
+	shiftIn := w - minSp%w
 	for l := l0; l <= l1; l++ {
 		line := b.lines[l]
 		if out {
@@ -289,9 +304,7 @@ func (b *Buffer) indentSel(out bool) {
 			if len(line) > 0 && line[0] == '\t' {
 				k = 1
 			} else {
-				for k < len(b.indent) && k < len(line) && line[k] == ' ' {
-					k++
-				}
+				k = min(shiftOut, leadingSpaces(line))
 			}
 			if k > 0 {
 				b.replaceRange(Pos{l, 0}, Pos{l, k}, nil)
@@ -304,6 +317,9 @@ func (b *Buffer) indentSel(out bool) {
 			}
 		} else if len(line) > 0 {
 			ind := []rune(b.indent)
+			if b.indent != "\t" {
+				ind = []rune(strings.Repeat(" ", shiftIn))
+			}
 			b.replaceRange(Pos{l, 0}, Pos{l, 0}, ind)
 			if anc.L == l && (anc.C > 0 || !sel) {
 				anc.C += len(ind)
@@ -315,6 +331,14 @@ func (b *Buffer) indentSel(out bool) {
 	}
 	b.groupSince(n)
 	b.selecting, b.anchor, b.cur = sel, b.clamp(anc), b.clamp(cur)
+}
+
+func leadingSpaces(line []rune) int {
+	n := 0
+	for n < len(line) && line[n] == ' ' {
+		n++
+	}
+	return n
 }
 
 func commentToken(b *Buffer) string {

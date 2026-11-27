@@ -86,6 +86,13 @@ func (h *harness) settle() {
 
 func (h *harness) keys(evs ...event.Event) {
 	for _, e := range evs {
+		// app.Window queues plain Tab and Shift+Tab as system events (to move
+		// focus when nothing handles them); do the same so tests see what the
+		// real window delivers.
+		if k, ok := e.(key.Event); ok && k.State == key.Press && k.Name == key.NameTab &&
+			(k.Modifiers == 0 || k.Modifiers == key.ModShift) {
+			e = input.SystemEvent{Event: e}
+		}
 		h.r.Queue(e)
 		h.frame()
 	}
