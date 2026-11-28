@@ -17,7 +17,7 @@ import (
 const tabW = 4
 
 func runeW(r rune) int {
-	if r < 32 {
+	if r < 0x7f {
 		return 1
 	}
 	w := runewidth.RuneWidth(r)
@@ -29,12 +29,18 @@ func runeW(r rune) int {
 
 // visCol is the grid column of rune index c in line.
 func visCol(line []rune, c int) int {
+	if c > len(line) {
+		c = len(line)
+	}
 	vc := 0
-	for i := 0; i < c && i < len(line); i++ {
-		if line[i] == '\t' {
+	for i := 0; i < c; i++ {
+		r := line[i]
+		if r >= 0x20 && r < 0x7f {
+			vc++
+		} else if r == '\t' {
 			vc += tabW - vc%tabW
 		} else {
-			vc += runeW(line[i])
+			vc += runeW(r)
 		}
 	}
 	return vc
@@ -81,6 +87,9 @@ var closers = map[rune]bool{')': true, ']': true, '}': true}
 var quotes = map[rune]bool{'"': true, '\'': true, '`': true}
 
 func (b *Buffer) typeText(s string) {
+	if b.readOnly {
+		return
+	}
 	rs := []rune(s)
 	if len(rs) == 1 {
 		b.typeRune(rs[0])
@@ -90,6 +99,9 @@ func (b *Buffer) typeText(s string) {
 }
 
 func (b *Buffer) typeRune(r rune) {
+	if b.readOnly {
+		return
+	}
 	line := b.lines[b.cur.L]
 	// Wrap a selection in brackets/quotes.
 	if b.hasSel() {
@@ -127,6 +139,7 @@ func (b *Buffer) typeRune(r rune) {
 	if cl, ok := pairs[r]; ok && !b.hasSel() && free {
 		b.insert([]rune{r, cl}, "type")
 		b.cur.C--
+		b.setLastCurA(b.cur)
 		return
 	}
 	if quotes[r] && !b.hasSel() && free {
@@ -137,31 +150,41 @@ func (b *Buffer) typeRune(r rune) {
 		if prev == 0 || unicode.IsSpace(prev) || pairs[prev] != 0 || prev == '=' || prev == ',' || prev == ':' {
 			b.insert([]rune{r, r}, "type")
 			b.cur.C--
+			b.setLastCurA(b.cur)
 			return
 		}
 	}
+	n := len(b.undo)
 	b.insert([]rune{r}, "type")
 	if closers[r] {
 		l := b.lines[b.cur.L]
 		if len(leadingWS(l)) == len(l)-1 && b.cur.L > 0 && b.cur.C == len(l) {
-			b.alignCloser()
+			if b.alignCloser() {
+				b.groupSince(n)
+			}
 		}
 	}
 }
 
 // alignCloser matches the indentation of a lone closing bracket to its opener.
-func (b *Buffer) alignCloser() {
+func (b *Buffer) alignCloser() bool {
 	if p, ok := matchBracket(b, Pos{b.cur.L, b.cur.C - 1}); ok {
 		want := leadingWS(b.lines[p.L])
 		have := leadingWS(b.lines[b.cur.L])
 		if string(want) != string(have) {
 			b.replaceRange(Pos{b.cur.L, 0}, Pos{b.cur.L, len(have)}, append([]rune(nil), want...))
 			b.cur = Pos{b.cur.L, len(want) + 1}
+			b.setLastCurA(b.cur)
+			return true
 		}
 	}
+	return false
 }
 
 func (b *Buffer) newline() {
+	if b.readOnly {
+		return
+	}
 	if b.hasSel() {
 		b.deleteSel()
 	}
@@ -196,6 +219,7 @@ func (b *Buffer) newline() {
 		if closers[next] && pairs[prev] == next {
 			b.insert(append(append(inner, '\n'), ind...), "")
 			b.cur = Pos{b.cur.L - 1, len(ind) + len([]rune(b.indent))}
+			b.setLastCurA(b.cur)
 		} else {
 			b.insert(inner, "")
 		}
@@ -207,6 +231,9 @@ func (b *Buffer) newline() {
 }
 
 func (b *Buffer) backspace() {
+	if b.readOnly {
+		return
+	}
 	if b.hasSel() {
 		b.deleteSel()
 		return
@@ -240,6 +267,9 @@ func (b *Buffer) backspace() {
 }
 
 func (b *Buffer) deleteForward() {
+	if b.readOnly {
+		return
+	}
 	if b.hasSel() {
 		b.deleteSel()
 	} else if b.cur.C < len(b.lines[b.cur.L]) {
@@ -261,6 +291,9 @@ func (b *Buffer) selectedLines() (int, int) {
 }
 
 func (b *Buffer) indentSel(out bool) {
+	if b.readOnly {
+		return
+	}
 	// With any selection, even inside one line, Tab and Shift+Tab shift the
 	// selected lines. Without one, Tab indents at the caret and Shift+Tab
 	// outdents the caret's line.
@@ -341,39 +374,74 @@ func leadingSpaces(line []rune) int {
 	return n
 }
 
-func commentToken(b *Buffer) string {
+// commentDelims returns line comment prefix, or (open, close) block comment
+// delimiters for languages without line comments (HTML, XML, CSS, Markdown).
+func commentDelims(b *Buffer) (line, open, close string) {
+	lang := strings.ToLower(b.hl.lang)
+	switch {
+	case strings.HasPrefix(lang, "python"), strings.HasPrefix(lang, "bash"), strings.HasPrefix(lang, "shell"),
+		strings.HasPrefix(lang, "ruby"), strings.HasPrefix(lang, "yaml"), strings.HasPrefix(lang, "toml"),
+		strings.HasPrefix(lang, "perl"), strings.HasPrefix(lang, "elixir"), strings.HasPrefix(lang, "julia"),
+		strings.HasPrefix(lang, "cmake"), strings.HasPrefix(lang, "powershell"), strings.HasPrefix(lang, "makefile"),
+		strings.HasPrefix(lang, "docker"), lang == "nix", lang == "hcl", lang == "terraform", lang == "r", lang == "ini":
+		return "#", "", ""
+	case strings.HasPrefix(lang, "sql"), lang == "lua", lang == "haskell", lang == "elm", lang == "ada":
+		return "--", "", ""
+	case strings.Contains(lang, "lisp"), strings.HasPrefix(lang, "clojure"), lang == "scheme", strings.HasPrefix(lang, "assembly"):
+		return ";", "", ""
+	case lang == "tex", lang == "erlang", lang == "matlab", lang == "octave":
+		return "%", "", ""
+	case lang == "viml":
+		return "\"", "", ""
+	case lang == "css":
+		return "", "/*", "*/"
+	case lang == "html", lang == "xml", lang == "markdown", lang == "svg":
+		return "", "<!--", "-->"
+	case lang == "json":
+		return "", "", ""
+	case lang == "objective-c", lang == "go", lang == "rust", lang == "c", lang == "c++", lang == "java",
+		lang == "javascript", lang == "typescript", lang == "swift", lang == "kotlin", lang == "c#", lang == "zig", lang == "dart", lang == "php", lang == "scala", lang == "scss":
+		return "//", "", ""
+	}
 	ext := strings.ToLower(filepath.Ext(b.path))
 	base := strings.ToLower(filepath.Base(b.path))
 	switch ext {
 	case ".py", ".sh", ".bash", ".zsh", ".fish", ".rb", ".yaml", ".yml", ".toml", ".r", ".pl", ".conf", ".ini", ".nix", ".tf", ".ex", ".exs", ".jl", ".cmake", ".ps1", ".env", ".gitignore", ".dockerignore":
-		return "#"
+		return "#", "", ""
 	case ".sql", ".lua", ".hs", ".elm", ".ada":
-		return "--"
+		return "--", "", ""
 	case ".lisp", ".clj", ".cljs", ".el", ".scm", ".asm", ".s":
-		return ";"
+		return ";", "", ""
 	case ".tex", ".erl", ".m":
-		return "%"
+		return "%", "", ""
 	case ".vim":
-		return "\""
-	case ".html", ".xml", ".md", ".json", ".svg":
-		return ""
+		return "\"", "", ""
+	case ".css":
+		return "", "/*", "*/"
+	case ".html", ".htm", ".xml", ".md", ".markdown", ".svg":
+		return "", "<!--", "-->"
+	case ".json":
+		return "", "", ""
 	}
 	switch base {
 	case "makefile", "dockerfile", "justfile", ".bashrc", ".zshrc", ".profile", "containerfile", "gnumakefile":
-		return "#"
+		return "#", "", ""
 	}
-	if strings.HasPrefix(b.hl.lang, "Bash") || strings.HasPrefix(b.hl.lang, "Python") {
-		return "#"
-	}
-	return "//"
+	return "//", "", ""
 }
 
 // toggleComment comments or uncomments the selected lines. It returns false
-// when the file type has no line comment syntax.
+// when the file type has no comment syntax.
 func (b *Buffer) toggleComment() bool {
-	tok := commentToken(b)
-	if tok == "" {
+	if b.readOnly {
 		return false
+	}
+	tok, open, close := commentDelims(b)
+	if tok == "" && open == "" {
+		return false
+	}
+	if tok == "" {
+		return b.toggleBlockComment(open, close)
 	}
 	l0, l1 := b.selectedLines()
 	all := true
@@ -427,7 +495,77 @@ func (b *Buffer) toggleComment() bool {
 	return true
 }
 
+func (b *Buffer) toggleBlockComment(open, close string) bool {
+	l0, l1 := b.selectedLines()
+	n := len(b.undo)
+	sel, anc, cur := b.selecting, b.anchor, b.cur
+	all := true
+	any := false
+	for l := l0; l <= l1; l++ {
+		line := b.lines[l]
+		ws := len(leadingWS(line))
+		if ws == len(line) {
+			continue
+		}
+		any = true
+		trimmed := strings.TrimRight(string(line[ws:]), " \t")
+		if !strings.HasPrefix(trimmed, open) || !strings.HasSuffix(trimmed, close) || len(trimmed) < len(open)+len(close) {
+			all = false
+		}
+	}
+	if !any {
+		return true
+	}
+	or, cr := []rune(open), []rune(close)
+	for l := l0; l <= l1; l++ {
+		line := b.lines[l]
+		ws := len(leadingWS(line))
+		if ws == len(line) {
+			continue
+		}
+		end := len(line)
+		for end > ws && (line[end-1] == ' ' || line[end-1] == '\t') {
+			end--
+		}
+		if all {
+			kEnd := len(cr)
+			if end-kEnd > ws+len(or) && line[end-kEnd-1] == ' ' {
+				kEnd++
+			}
+			b.replaceRange(Pos{l, end - kEnd}, Pos{l, end}, nil)
+			kStart := len(or)
+			if ws+kStart < len(b.lines[l]) && b.lines[l][ws+kStart] == ' ' {
+				kStart++
+			}
+			b.replaceRange(Pos{l, ws}, Pos{l, ws + kStart}, nil)
+			if anc.L == l && anc.C >= ws {
+				anc.C = max(ws, anc.C-kStart)
+			}
+			if cur.L == l && cur.C >= ws {
+				cur.C = max(ws, cur.C-kStart)
+			}
+		} else {
+			insClose := append([]rune{' '}, cr...)
+			insOpen := append(append([]rune(nil), or...), ' ')
+			b.replaceRange(Pos{l, end}, Pos{l, end}, insClose)
+			b.replaceRange(Pos{l, ws}, Pos{l, ws}, insOpen)
+			if anc.L == l && anc.C >= ws {
+				anc.C += len(insOpen)
+			}
+			if cur.L == l && cur.C >= ws {
+				cur.C += len(insOpen)
+			}
+		}
+	}
+	b.groupSince(n)
+	b.selecting, b.anchor, b.cur = sel, b.clamp(anc), b.clamp(cur)
+	return true
+}
+
 func (b *Buffer) moveLines(d int) {
+	if b.readOnly {
+		return
+	}
 	l0, l1 := b.selectedLines()
 	if (d < 0 && l0 == 0) || (d > 0 && l1 >= len(b.lines)-1) {
 		return
@@ -450,6 +588,9 @@ func (b *Buffer) moveLines(d int) {
 }
 
 func (b *Buffer) duplicateLines(down bool) {
+	if b.readOnly {
+		return
+	}
 	l0, l1 := b.selectedLines()
 	text := b.textRange(Pos{l0, 0}, Pos{l1, len(b.lines[l1])})
 	sel, anc, cur := b.selecting, b.anchor, b.cur
@@ -459,10 +600,13 @@ func (b *Buffer) duplicateLines(down bool) {
 		anc.L += d
 		cur.L += d
 	}
-	b.selecting, b.anchor, b.cur = sel, anc, cur
+	b.selecting, b.anchor, b.cur = sel, b.clamp(anc), b.clamp(cur)
 }
 
 func (b *Buffer) deleteLines() {
+	if b.readOnly {
+		return
+	}
 	l0, l1 := b.selectedLines()
 	col := b.cur.C
 	if l1 < len(b.lines)-1 {
@@ -872,48 +1016,90 @@ func completePath(root, s string) string {
 		return s
 	}
 	sort.Strings(names)
-	common := names[0]
+	common := []rune(names[0])
 	for _, n := range names[1:] {
-		for !strings.HasPrefix(n, common) {
-			common = common[:len(common)-1]
+		nr := []rune(n)
+		k := 0
+		for k < len(common) && k < len(nr) && common[k] == nr[k] {
+			k++
 		}
+		common = common[:k]
 	}
-	return s + strings.TrimPrefix(common, prefix)
+	return s + strings.TrimPrefix(string(common), prefix)
 }
 
 // ---- rune offsets (for the platform text-input / IME protocol) ----
 
+const lineBlockSize = 256
+
+func (b *Buffer) ensureBlocks() {
+	if b.blockLens != nil && b.blockVer == b.version && b.blockLines == len(b.lines) {
+		return
+	}
+	nb := (len(b.lines) + lineBlockSize - 1) / lineBlockSize
+	if cap(b.blockLens) < nb {
+		b.blockLens = make([]int, nb)
+	}
+	b.blockLens = b.blockLens[:nb]
+	for blk := 0; blk < nb; blk++ {
+		start := blk * lineBlockSize
+		end := min(len(b.lines), start+lineBlockSize)
+		sum := 0
+		for i := start; i < end; i++ {
+			sum += len(b.lines[i]) + 1
+		}
+		b.blockLens[blk] = sum
+	}
+	b.blockVer = b.version
+	b.blockLines = len(b.lines)
+}
+
+// updateBlockSingle updates the cached block length in O(1) after a single-line edit.
+func (b *Buffer) updateBlockSingle(line, delta int) {
+	if b.blockLens != nil && b.blockVer == b.version-1 && b.blockLines == len(b.lines) {
+		b.blockLens[line/lineBlockSize] += delta
+		b.blockVer = b.version
+		return
+	}
+	b.blockLens = nil
+}
+
 func (b *Buffer) offsetOf(p Pos) int {
-	b.ensureLineStarts()
+	b.ensureBlocks()
 	p = b.clamp(p)
-	return b.lineStarts[p.L] + p.C
+	blk := p.L / lineBlockSize
+	off := 0
+	for i := 0; i < blk; i++ {
+		off += b.blockLens[i]
+	}
+	for i := blk * lineBlockSize; i < p.L; i++ {
+		off += len(b.lines[i]) + 1
+	}
+	return off + p.C
 }
 
 func (b *Buffer) posAt(off int) Pos {
-	b.ensureLineStarts()
+	b.ensureBlocks()
 	if off <= 0 {
 		return Pos{0, 0}
 	}
-	ls := b.lineStarts
-	l := sort.Search(len(ls), func(i int) bool { return ls[i] > off }) - 1
-	if l < 0 {
-		l = 0
+	blk := 0
+	for blk < len(b.blockLens) && off >= b.blockLens[blk] {
+		off -= b.blockLens[blk]
+		blk++
 	}
-	return b.clamp(Pos{l, off - ls[l]})
-}
-
-func (b *Buffer) ensureLineStarts() {
-	if b.lineStartsVer == b.version && len(b.lineStarts) == len(b.lines) {
-		return
+	if blk >= len(b.blockLens) {
+		last := len(b.lines) - 1
+		return Pos{last, len(b.lines[last])}
 	}
-	if cap(b.lineStarts) < len(b.lines) {
-		b.lineStarts = make([]int, len(b.lines))
+	start := blk * lineBlockSize
+	end := min(len(b.lines), start+lineBlockSize)
+	for i := start; i < end; i++ {
+		if off <= len(b.lines[i]) {
+			return Pos{i, off}
+		}
+		off -= len(b.lines[i]) + 1
 	}
-	b.lineStarts = b.lineStarts[:len(b.lines)]
-	off := 0
-	for i, l := range b.lines {
-		b.lineStarts[i] = off
-		off += len(l) + 1
-	}
-	b.lineStartsVer = b.version
+	last := len(b.lines) - 1
+	return Pos{last, len(b.lines[last])}
 }

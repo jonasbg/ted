@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"image"
+	"net"
 	"os"
 	"path/filepath"
 	"slices"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"gioui.org/app"
+	"gioui.org/font"
 	"gioui.org/io/key"
 	"gioui.org/io/system"
 	"gioui.org/layout"
@@ -64,13 +66,22 @@ type App struct {
 
 	overlay *Overlay
 	find    *FindBar
+	findBuf *Buffer
+	findVer int
 	lastQ   []rune // last search, for find-next and match highlights
 
-	mu      sync.Mutex
-	pending []any
+	closedTabs []target // recently closed files, for Cmd/Ctrl+Shift+T
+
+	mu       sync.Mutex
+	pending  []any
+	done     chan struct{}
+	stopOnce sync.Once
+	listener net.Listener
+	focusedA bool // atomic-like mirror of focused under mu for ticker throttling
 
 	files          []string
 	filesLoading   bool
+	treeLoading    bool
 	searchScope    searchScope // Cmd+K scope last chosen with Tab
 	lastGitRefresh time.Time
 	gitBusy        bool
@@ -102,6 +113,7 @@ type App struct {
 
 	scrollAt      time.Time // last time the editor view scrolled
 	lastVy        float32
+	lastVx        float32
 	lastScrollBuf *Buffer
 
 	sideView int // sideFiles, sideChanges or sideHistory
@@ -121,8 +133,12 @@ type App struct {
 }
 
 func newApp(w *app.Window, root string, th *Theme, fontSp float32) *App {
-	a := &App{w: w, th: th, root: root, showSidebar: root != "", sidebarDp: 250, fontSp: fontSp, follow: true}
-	a.tc = newTextCache(func() {
+	return newAppWithFonts(w, root, th, fontSp, faceFonts)
+}
+
+func newAppWithFonts(w *app.Window, root string, th *Theme, fontSp float32, fonts [nFaces]font.Font) *App {
+	a := &App{w: w, th: th, root: root, showSidebar: root != "", sidebarDp: 250, fontSp: fontSp, follow: true, done: make(chan struct{})}
+	a.tc = newTextCacheWithFonts(fonts, func() {
 		if a.w != nil {
 			a.w.Invalidate()
 		}
@@ -135,6 +151,27 @@ func newApp(w *app.Window, root string, th *Theme, fontSp float32) *App {
 	a.ui.hoverTab, a.ui.hoverRow = -1, -1
 	a.scm.hover, a.scm.tabHover = -1, -1
 	return a
+}
+
+// stop tears down background goroutines and the IPC socket when a window closes.
+func (a *App) stop() {
+	a.stopOnce.Do(func() {
+		if a.done != nil {
+			close(a.done)
+		}
+		a.mu.Lock()
+		l := a.listener
+		sock := a.socket
+		a.listener = nil
+		a.socket = ""
+		a.mu.Unlock()
+		if l != nil {
+			l.Close()
+		}
+		if sock != "" {
+			os.Remove(sock)
+		}
+	})
 }
 
 func (a *App) post(v any) {
@@ -316,6 +353,12 @@ func (a *App) closeBuffer(i int) {
 	if i < 0 || i >= len(a.bufs) {
 		return
 	}
+	if b := a.bufs[i]; b.path != "" {
+		a.closedTabs = append(a.closedTabs, target{path: b.path, line: b.cur.L + 1, col: b.cur.C + 1})
+		if len(a.closedTabs) > 20 {
+			a.closedTabs = a.closedTabs[len(a.closedTabs)-20:]
+		}
+	}
 	a.bufs = append(a.bufs[:i], a.bufs[i+1:]...)
 	if a.active >= len(a.bufs) {
 		a.active = len(a.bufs) - 1
@@ -329,6 +372,70 @@ func (a *App) closeBuffer(i int) {
 		a.find = nil
 	}
 	a.saveSessionIfChanged()
+}
+
+func (a *App) reopenClosedTab() {
+	for len(a.closedTabs) > 0 {
+		t := a.closedTabs[len(a.closedTabs)-1]
+		a.closedTabs = a.closedTabs[:len(a.closedTabs)-1]
+		if _, err := os.Stat(t.path); err != nil {
+			continue
+		}
+		if a.openFile(t.path, t.line, t.col) {
+			return
+		}
+	}
+	a.setMsg("No recently closed tabs")
+}
+
+func (a *App) saveBufferAs(b *Buffer) {
+	if b == nil || b.readOnly {
+		if b != nil {
+			a.setMsg("%s is a read-only view", b.name())
+		}
+		return
+	}
+	initial := ""
+	if b.path != "" {
+		initial = a.rel(b.path)
+	} else if a.showSidebar {
+		if d := a.rel(a.targetDir(a.tree.selected())); d != "." {
+			initial = d + "/"
+		}
+	}
+	a.prompt("Save "+b.name()+" as", initial, true, func(s string) {
+		s = strings.TrimSpace(s)
+		if s == "" || strings.HasSuffix(s, "/") {
+			return
+		}
+		p := a.abs(s)
+		commit := func() {
+			b.path = p
+			b.untitledN = 0
+			b.modTime = time.Time{}
+			b.size = 0
+			b.conflict = false
+			b.diskGone = false
+			b.hl.resolved = false
+			b.hl.lexer = nil
+			b.hl.version = -1
+			b.csv = nil
+			b.resolveLexer()
+			a.saveBuffer(b, nil)
+			a.tree.reveal(p)
+			a.loadFiles()
+		}
+		if p != b.path {
+			if _, err := os.Stat(p); err == nil {
+				a.confirm(fmt.Sprintf("%s already exists. Replace it?", a.rel(p)), []button{
+					{"Replace", 'r', commit},
+					{"Cancel", 'c', func() {}},
+				})
+				return
+			}
+		}
+		commit()
+	})
 }
 
 func (a *App) requestClose(i int) {
@@ -437,6 +544,25 @@ func (a *App) reload(b *Buffer) {
 }
 
 func (a *App) quit() {
+	if a.noSession {
+		dirty := 0
+		for _, b := range a.bufs {
+			if b.dirty() {
+				dirty++
+			}
+		}
+		if dirty > 0 {
+			a.confirm(fmt.Sprintf("Discard unsaved changes in %d file(s)?", dirty), []button{
+				{"Discard & Quit", 'd', func() {
+					if a.w != nil {
+						a.w.Perform(system.ActionClose)
+					}
+				}},
+				{"Cancel", 'c', func() {}},
+			})
+			return
+		}
+	}
 	a.saveSession()
 	if a.w != nil {
 		a.w.Perform(system.ActionClose)
@@ -474,17 +600,13 @@ func (a *App) scheduleHighlight(b *Buffer, visibleLines int) {
 		from = max(0, top-hlWindowMargin)
 		to = min(len(b.lines), bot+hlWindowMargin)
 	}
-	var sb strings.Builder
-	for i := from; i < to; i++ {
-		if i > from {
-			sb.WriteByte('\n')
-		}
-		sb.WriteString(string(b.lines[i]))
-	}
-	text := sb.String()
+	// Line slices are immutable once created, so cloning only the slice headers
+	// lets text serialization happen off the UI goroutine.
+	lines := slices.Clone(b.lines[from:to])
 	h.running = true
 	ver, lexer, th := b.version, h.lexer, a.th
 	go func() {
+		text := textOf(lines)
 		a.post(hlResult{th, b, ver, from, windowed, computeSpans(lexer, th, text)})
 	}()
 }
@@ -602,10 +724,75 @@ func (a *App) reloadInBackground(b *Buffer) {
 
 func (a *App) startTicker() {
 	go func() {
+		t := time.NewTicker(time.Second)
+		defer t.Stop()
+		ticks := 0
 		for {
-			time.Sleep(time.Second)
-			a.post(tickEvent{})
+			select {
+			case <-a.done:
+				return
+			case <-t.C:
+				ticks++
+				a.mu.Lock()
+				foc := a.focusedA
+				a.mu.Unlock()
+				// Throttle background wakeups when the window is unfocused
+				// to avoid unnecessary GPU redraws and battery drain.
+				if !foc && ticks%5 != 0 {
+					continue
+				}
+				a.post(tickEvent{})
+			}
 		}
+	}()
+}
+
+// refreshTreeAsync reads loaded directories off the UI goroutine and merges
+// the results back onto the tree.
+func (a *App) refreshTreeAsync() {
+	if a.root == "" || !a.showSidebar || a.treeLoading {
+		return
+	}
+	type dirJob struct {
+		n    *node
+		path string
+	}
+	var jobs []dirJob
+	var collect func(n *node)
+	collect = func(n *node) {
+		if !n.loaded {
+			return
+		}
+		jobs = append(jobs, dirJob{n, n.path})
+		for _, c := range n.children {
+			if c.isDir && c.loaded {
+				collect(c)
+			}
+		}
+	}
+	collect(a.tree.root)
+	if len(jobs) == 0 {
+		return
+	}
+	a.treeLoading = true
+	showHidden := a.tree.showHidden
+	go func() {
+		results := make([][]treeEntry, len(jobs))
+		for i, j := range jobs {
+			results[i] = readDirEntries(j.path, showHidden)
+		}
+		a.post(func() {
+			a.treeLoading = false
+			if a.tree.showHidden != showHidden {
+				return
+			}
+			for i, j := range jobs {
+				if j.n.loaded {
+					a.tree.applyEntries(j.n, results[i])
+				}
+			}
+			a.tree.flatten()
+		})
 	}()
 }
 
@@ -622,6 +809,11 @@ func (a *App) drainPending() {
 			h := d.buf.hl
 			h.running = false
 			if d.theme != a.th {
+				continue
+			}
+			// If edits happened while this highlight ran and we already have
+			// line-spliced spans, don't clobber them with stale un-spliced ones.
+			if d.version != d.buf.version && len(h.spans) > 0 {
 				continue
 			}
 			h.spans = d.spans
@@ -676,7 +868,7 @@ func (a *App) drainPending() {
 			a.trimWebCache()
 			a.checkOmarchyTheme()
 			if a.tickN%2 == 0 {
-				a.tree.refresh()
+				a.refreshTreeAsync()
 			}
 			if time.Since(a.lastGitRefresh) >= a.gitPollInterval() {
 				a.refreshGit()
@@ -722,6 +914,15 @@ func (a *App) frame(gtx layout.Context) {
 	}
 	if a.msg != "" && a.msgErr && time.Since(a.msgTime) > 12*time.Second {
 		a.msg = ""
+	}
+	if a.find != nil {
+		if b := a.buf(); b != a.findBuf || (b != nil && b.version != a.findVer) {
+			a.findBuf = b
+			if b != nil {
+				a.findVer = b.version
+			}
+			a.findUpdate()
+		}
 	}
 	before := a.stateSig()
 	a.layout(gtx)

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"unicode/utf8"
+	"unsafe"
 
 	"github.com/alecthomas/chroma/v2/lexers"
 )
@@ -25,9 +26,10 @@ func isJSON(b *Buffer) bool {
 // encoding/json only validates here: its Indent unescapes \u sequences,
 // which would rewrite strings the author spelled on purpose.
 func prettyJSON(src, indent string) (string, error) {
-	if !json.Valid([]byte(src)) {
+	raw := unsafe.Slice(unsafe.StringData(src), len(src))
+	if !json.Valid(raw) {
 		// Indent only for its SyntaxError, which says where
-		if err := json.Indent(&bytes.Buffer{}, []byte(src), "", indent); err != nil {
+		if err := json.Indent(&bytes.Buffer{}, raw, "", indent); err != nil {
 			return "", err
 		}
 		return "", errors.New("invalid JSON")
@@ -93,6 +95,7 @@ func (a *App) formatJSON(b *Buffer) {
 	if b == nil || b.readOnly {
 		return
 	}
+	b.encodeAllSpans()
 	src := b.text()
 	if strings.TrimSpace(src) == "" {
 		a.setMsg("Nothing to format")

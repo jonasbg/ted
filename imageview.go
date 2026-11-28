@@ -10,6 +10,9 @@ import (
 	"unicode/utf8"
 
 	"gioui.org/f32"
+	"gioui.org/io/event"
+	"gioui.org/io/key"
+	"gioui.org/io/pointer"
 	"gioui.org/layout"
 	"gioui.org/op"
 	"gioui.org/op/clip"
@@ -36,11 +39,35 @@ type imageView struct {
 	err     string
 	loading bool
 	stale   bool // the file changed; load again but keep showing the old one
+
+	zoom     float32 // 0 = fit to window; >0 = scale factor relative to dp size
+	panX     float32
+	panY     float32
+	dragging bool
+	dragLast f32.Point
+	tag      int
+
 	checker struct {
 		key [2]int
 		th  *Theme
 		op  paint.ImageOp
 	}
+}
+
+func (iv *imageView) zoomLabel() string {
+	if iv.zoom <= 0 {
+		return "Fit"
+	}
+	return fmt.Sprintf("%d%%", int(iv.zoom*100+0.5))
+}
+
+func (iv *imageView) toggleZoom() {
+	if iv.zoom <= 0 {
+		iv.zoom = 1
+	} else {
+		iv.zoom = 0
+	}
+	iv.panX, iv.panY = 0, 0
 }
 
 func loadImageBuffer(path string) (*Buffer, error) {
@@ -165,22 +192,95 @@ func (a *App) drawImageView(gtx layout.Context, b *Buffer) {
 		return
 	}
 	pad := gtx.Dp(24)
-	availW, availH := r.Dx()-2*pad, r.Dy()-2*pad
-	// one image pixel per dp, like a browser, shrunk to fit the tab
-	w, h := gtx.Dp(unit.Dp(iv.orig.X)), gtx.Dp(unit.Dp(iv.orig.Y))
-	if w > availW {
-		h, w = h*availW/max(1, w), availW
+	availW, availH := max(1, r.Dx()-2*pad), max(1, r.Dy()-2*pad)
+
+	// Handle zoom (scroll / double-click) and pan (drag when zoomed).
+	for {
+		ev, ok := gtx.Event(pointer.Filter{Target: &iv.tag, Kinds: pointer.Press | pointer.Drag | pointer.Release | pointer.Cancel | pointer.Scroll,
+			ScrollX: pointer.ScrollRange{Min: -1 << 20, Max: 1 << 20}, ScrollY: pointer.ScrollRange{Min: -1 << 20, Max: 1 << 20}})
+		if !ok {
+			break
+		}
+		e := ev.(pointer.Event)
+		switch e.Kind {
+		case pointer.Scroll:
+			if e.Modifiers.Contain(key.ModShortcut) || e.Modifiers.Contain(key.ModCtrl) || iv.zoom <= 0 {
+				if e.Scroll.Y != 0 {
+					base := iv.zoom
+					if base <= 0 {
+						// Start zooming from the current fit ratio.
+						natW := float32(max(1, gtx.Dp(unit.Dp(iv.orig.X))))
+						natH := float32(max(1, gtx.Dp(unit.Dp(iv.orig.Y))))
+						base = min(1, min(float32(availW)/natW, float32(availH)/natH))
+					}
+					if e.Scroll.Y < 0 {
+						base *= 1.15
+					} else {
+						base /= 1.15
+					}
+					iv.zoom = max(0.1, min(16, base))
+				}
+			} else {
+				iv.panX -= e.Scroll.X
+				iv.panY -= e.Scroll.Y
+			}
+		case pointer.Press:
+			if e.Buttons != pointer.ButtonPrimary {
+				continue
+			}
+			a.focus = focusEditor
+			if a.ui.isDoubleClick(gtx.Now, "img", 0) {
+				iv.toggleZoom()
+				continue
+			}
+			if iv.zoom > 0 {
+				iv.dragging = true
+				iv.dragLast = e.Position
+			}
+		case pointer.Drag:
+			if iv.dragging {
+				iv.panX += e.Position.X - iv.dragLast.X
+				iv.panY += e.Position.Y - iv.dragLast.Y
+				iv.dragLast = e.Position
+			}
+		case pointer.Release, pointer.Cancel:
+			iv.dragging = false
+		}
 	}
-	if h > availH {
-		w, h = w*availH/max(1, h), availH
+
+	// one image pixel per dp, like a browser, shrunk to fit the tab unless zoomed
+	natW, natH := gtx.Dp(unit.Dp(iv.orig.X)), gtx.Dp(unit.Dp(iv.orig.Y))
+	var w, h int
+	if iv.zoom > 0 {
+		w = max(1, int(float32(natW)*iv.zoom+0.5))
+		h = max(1, int(float32(natH)*iv.zoom+0.5))
+	} else {
+		w, h = natW, natH
+		if w > availW {
+			h, w = h*availW/max(1, w), availW
+		}
+		if h > availH {
+			w, h = w*availH/max(1, h), availH
+		}
+		w, h = max(1, w), max(1, h)
 	}
-	w, h = max(1, w), max(1, h)
-	at := image.Pt(r.Min.X+(r.Dx()-w)/2, r.Min.Y+(r.Dy()-h)/2)
+	maxPanX := float32(max(0, (w-availW)/2+pad))
+	maxPanY := float32(max(0, (h-availH)/2+pad))
+	iv.panX = max(-maxPanX, min(maxPanX, iv.panX))
+	iv.panY = max(-maxPanY, min(maxPanY, iv.panY))
+	at := image.Pt(r.Min.X+(r.Dx()-w)/2+int(iv.panX), r.Min.Y+(r.Dy()-h)/2+int(iv.panY))
 	dst := image.Rectangle{Min: at, Max: at.Add(image.Pt(w, h))}
 
+	viewClip := clip.Rect(r).Push(ops)
+	event.Op(ops, &iv.tag)
 	// a checkerboard shows through transparent pixels
-	cell := gtx.Dp(8)
-	cols, rows := (w+cell-1)/cell, (h+cell-1)/cell
+	cell := max(1, gtx.Dp(8))
+	cols, rows := max(1, (w+cell-1)/cell), max(1, (h+cell-1)/cell)
+	// Cap checkerboard texture size when zoomed way in.
+	if cols > 512 || rows > 512 {
+		cell = max(cell, max((w+511)/512, (h+511)/512))
+		cols, rows = max(1, (w+cell-1)/cell), max(1, (h+cell-1)/cell)
+	}
 	if k := [2]int{cols, rows}; iv.checker.key != k || iv.checker.th != th {
 		c := image.NewNRGBA(image.Rect(0, 0, cols, rows))
 		c1, c2 := mixC(th.bg, th.fg, 0.07), mixC(th.bg, th.fg, 0.13)
@@ -206,6 +306,7 @@ func (a *App) drawImageView(gtx layout.Context, b *Buffer) {
 	}
 	drawImage(ops, op, image.Rectangle{Max: iv.img.size}, dst, 0)
 	strokeRRect(ops, dst.Inset(-1), 0, 1, withA(th.border, 0xc0))
+	viewClip.Pop()
 }
 
 // drawImage paints the src part of an image into dst, clipped to dst with

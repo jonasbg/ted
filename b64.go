@@ -147,7 +147,7 @@ func (a *App) toggleBase64(b *Buffer, p Pos) bool {
 		a.setMsg("Base64: %s", first)
 		return true
 	}
-	if json.Valid([]byte(text)) && strings.ContainsAny(strings.TrimSpace(text), "{[") {
+	if trimmed := strings.TrimSpace(text); len(trimmed) > 0 && (trimmed[0] == '{' || trimmed[0] == '[') && json.Valid([]byte(text)) {
 		if pretty, err := prettyJSON(text, b.indent); err == nil {
 			text = strings.TrimSuffix(pretty, "\n")
 			sp.isJSON = true
@@ -223,7 +223,9 @@ func (a *App) encodeSpan(b *Buffer, i int) {
 		// is clean again
 		b.doUndo()
 	} else {
+		b.inB64Encode = true
 		b.replaceRange(sp.a, sp.c, []rune(out)) // deleting the span drops it
+		b.inB64Encode = false
 		b.breakUndo()
 	}
 	b.cur, b.selecting = sp.a, false
@@ -241,6 +243,8 @@ func (b *Buffer) encodeAllSpans() bool {
 		return false
 	}
 	n, cur := len(b.undo), b.cur
+	b.inB64Encode = true
+	defer func() { b.inB64Encode = false }()
 	for range len(b.b64) {
 		if len(b.b64) == 0 {
 			break
@@ -295,6 +299,10 @@ func (b *Buffer) shiftB64Insert(p, e Pos) {
 	}
 	for i := range b.b64 {
 		sp := &b.b64[i]
+		if b.inB64Encode && sp.c == p {
+			// Re-encoding a span immediately after sp must not grow sp into it.
+			continue
+		}
 		if !sp.c.Less(p) {
 			sp.c = mv(sp.c)
 			if !sp.a.Less(p) {

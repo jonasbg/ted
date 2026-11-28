@@ -139,7 +139,7 @@ func fetchImage(u string, maxSide int) *mdImage {
 func fetchCard(u string) *ogCard {
 	data, ctype, final, err := webGet(u, "text/html,application/xhtml+xml", 1<<20)
 	c := &ogCard{}
-	if err != nil || (ctype != "" && !strings.Contains(ctype, "html")) {
+	if err != nil || (ctype != "" && !strings.Contains(strings.ToLower(ctype), "html")) {
 		return c
 	}
 	data = toUTF8(data, ctype)
@@ -222,8 +222,18 @@ func firstNonEmpty(xs ...string) string {
 // encodings, to UTF-8. Other encodings are rare enough on today's web that
 // their tables are not worth the binary size; such titles stay as they are.
 func toUTF8(data []byte, ctype string) []byte {
-	if utf8.Valid(data) {
-		return data
+	// LimitReader can cut a valid UTF-8 response mid-rune at the cap; trim up to
+	// 3 trailing incomplete bytes before deciding it isn't UTF-8.
+	trimmed := data
+	for i := 0; i < 3 && len(trimmed) > 0 && !utf8.Valid(trimmed); i++ {
+		if utf8.RuneStart(trimmed[len(trimmed)-1]) || (trimmed[len(trimmed)-1]&0xC0) == 0x80 {
+			trimmed = trimmed[:len(trimmed)-1]
+		} else {
+			break
+		}
+	}
+	if utf8.Valid(trimmed) {
+		return trimmed
 	}
 	cs := strings.ToLower(ctype)
 	if i := bytes.Index(bytes.ToLower(data[:min(len(data), 2048)]), []byte("charset=")); i >= 0 {

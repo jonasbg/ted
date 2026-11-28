@@ -39,16 +39,21 @@ type uiState struct {
 	hoverTab   int
 	hoverSplit bool
 
-	clickCount   int
-	lastClick    time.Time
-	lastClickPos Pos
-	dragEditor   bool
-	dragBlock    bool // dragging out a CSV cell selection
-	dragPos      f32.Point
-	dragSplit    bool
-	dragThumb    bool
-	hoverThumb   bool
-	dragThumbOff float32
+	clickCount    int
+	lastClick     time.Time
+	lastClickPos  Pos
+	dragEditor    bool
+	dragBlock     bool // dragging out a CSV cell selection
+	dragAnchorS   Pos  // initial double/triple-click selection bounds
+	dragAnchorE   Pos
+	dragPos       f32.Point
+	dragSplit     bool
+	dragThumb     bool
+	hoverThumb    bool
+	dragThumbOff  float32
+	dragHThumb    bool
+	hoverHThumb   bool
+	dragHThumbOff float32
 
 	caret image.Rectangle
 
@@ -59,7 +64,7 @@ type uiState struct {
 	clickIdx  int
 	clickAt   time.Time
 
-	editorTag, treeTag, tabsTag, splitTag, thumbTag, statusTag int
+	editorTag, treeTag, tabsTag, splitTag, thumbTag, hthumbTag, statusTag int
 }
 
 func (a *App) layout(gtx layout.Context) {
@@ -199,6 +204,43 @@ func (a *App) drawWelcome(gtx layout.Context, r image.Rectangle) {
 
 // ---- tabs ----
 
+// tabLabels returns display labels for open buffers, disambiguating duplicate
+// filenames with the shortest unique parent directory suffix (e.g. "api/main.go").
+func tabLabels(bufs []*Buffer) []string {
+	labels := make([]string, len(bufs))
+	counts := make(map[string]int, len(bufs))
+	for i, b := range bufs {
+		labels[i] = b.name()
+		if b.path != "" {
+			counts[labels[i]]++
+		}
+	}
+	for i, b := range bufs {
+		if b.path == "" || counts[labels[i]] <= 1 {
+			continue
+		}
+		parts := strings.Split(b.path, "/")
+		for depth := 2; depth <= len(parts); depth++ {
+			cand := strings.Join(parts[len(parts)-depth:], "/")
+			unique := true
+			for j, other := range bufs {
+				if j == i || other.path == "" {
+					continue
+				}
+				if strings.HasSuffix(other.path, "/"+cand) || other.path == cand {
+					unique = false
+					break
+				}
+			}
+			labels[i] = cand
+			if unique {
+				break
+			}
+		}
+	}
+	return labels
+}
+
 func (a *App) drawTabs(gtx layout.Context) {
 	ops := gtx.Ops
 	u := &a.ui
@@ -208,11 +250,12 @@ func (a *App) drawTabs(gtx layout.Context) {
 
 	pad := gtx.Dp(12)
 	closeW := gtx.Dp(18)
+	labels := tabLabels(a.bufs)
 
 	widths := make([]int, len(a.bufs))
 	total := 0
 	for i, b := range a.bufs {
-		widths[i] = pad + a.tc.width(tabFace(b), u.uiPx, b.name()) + gtx.Dp(8) + closeW + gtx.Dp(6)
+		widths[i] = pad + a.tc.width(tabFace(b), u.uiPx, labels[i]) + gtx.Dp(8) + closeW + gtx.Dp(6)
 		total += widths[i]
 	}
 	// keep the active tab in view
@@ -250,6 +293,9 @@ func (a *App) drawTabs(gtx layout.Context) {
 		case pointer.Scroll:
 			u.tabScroll += int(e.Scroll.X + e.Scroll.Y)
 		case pointer.Press:
+			if e.Buttons != pointer.ButtonPrimary && e.Buttons != pointer.ButtonTertiary {
+				continue
+			}
 			for i, tr := range u.tabRects {
 				if !pt.In(tr) {
 					continue
@@ -290,7 +336,7 @@ func (a *App) drawTabs(gtx layout.Context) {
 		if b.conflict || b.diskGone {
 			fg = th.errorFg
 		}
-		a.tc.draw(ops, tabFace(b), u.uiPx, x+pad, a.uiBaseline(r.Min.Y, r.Dy()), b.name(), fg)
+		a.tc.draw(ops, tabFace(b), u.uiPx, x+pad, a.uiBaseline(r.Min.Y, r.Dy()), labels[i], fg)
 		cx := tr.Max.X - gtx.Dp(6) - closeW/2
 		cy := r.Min.Y + r.Dy()/2
 		cr := image.Rect(cx-closeW/2, cy-closeW/2, cx+closeW/2, cy+closeW/2)
@@ -309,6 +355,20 @@ func (a *App) drawTabs(gtx layout.Context) {
 			cross(ops, cx, cy, gtx.Dp(7), float32(gtx.Dp(1.4)), th.dim)
 		}
 		x += widths[i]
+	}
+	// Subtle overflow edge fades when tabs extend past the bar.
+	fadeW := gtx.Dp(16)
+	if u.tabScroll > 0 && fadeW > 0 {
+		for k := 0; k < fadeW; k++ {
+			a := uint8(220 * (fadeW - k) / fadeW)
+			fill(ops, image.Rect(r.Min.X+k, r.Min.Y, r.Min.X+k+1, r.Max.Y), withA(th.tabBar, a))
+		}
+	}
+	if total > u.tabScroll+r.Dx() && fadeW > 0 {
+		for k := 0; k < fadeW; k++ {
+			a := uint8(220 * (k + 1) / fadeW)
+			fill(ops, image.Rect(r.Max.X-fadeW+k, r.Min.Y, r.Max.X-fadeW+k+1, r.Max.Y), withA(th.tabBar, a))
+		}
 	}
 	st.Pop()
 }
@@ -350,7 +410,7 @@ func (a *App) drawStatus(gtx layout.Context) {
 		pos := fmt.Sprintf("Ln %d, Col %d", b.cur.L+1, visCol(b.lines[b.cur.L], b.cur.C)+1)
 		if b.hasSel() {
 			s, e := b.selRange()
-			n := len(b.selText())
+			n := b.offsetOf(e) - b.offsetOf(s)
 			if e.L > s.L {
 				pos += fmt.Sprintf(" (%d lines, %d chars)", e.L-s.L+1, n)
 			} else {
@@ -383,8 +443,8 @@ func (a *App) drawStatus(gtx layout.Context) {
 		if iv := b.image; iv != nil {
 			right, ids = []string{iv.format, humanSize(b.size)}, []string{"imgfmt", "imgsize"}
 			if iv.img != nil {
-				right = append([]string{fmt.Sprintf("%d × %d", iv.orig.X, iv.orig.Y)}, right...)
-				ids = append([]string{"imgdim"}, ids...)
+				right = append([]string{iv.zoomLabel(), fmt.Sprintf("%d × %d", iv.orig.X, iv.orig.Y)}, right...)
+				ids = append([]string{"imgzoom", "imgdim"}, ids...)
 			}
 		}
 		if b.previewing() {
@@ -424,7 +484,7 @@ func (a *App) drawStatus(gtx layout.Context) {
 		case pointer.Move:
 			u.hoverStatus = hit
 		case pointer.Press:
-			if hit != "" {
+			if e.Buttons == pointer.ButtonPrimary && hit != "" {
 				a.statusClick(hit)
 			}
 		}
@@ -518,6 +578,9 @@ func (a *App) drawSidebar(gtx layout.Context) {
 		case pointer.Scroll:
 			u.treeVy = max(0, min(u.treeVy+e.Scroll.Y, maxVy))
 		case pointer.Press:
+			if e.Buttons != pointer.ButtonPrimary {
+				continue
+			}
 			if inHeader {
 				// header: the + button creates a file
 				if a.sideView == sideFiles && e.Position.X > float32(r.Max.X-gtx.Dp(34)) {
@@ -655,7 +718,7 @@ func (a *App) drawSidebar(gtx layout.Context) {
 	// splitter
 	split := image.Rect(r.Max.X, r.Min.Y, r.Max.X+gtx.Dp(panelGapDp), r.Max.Y)
 	for {
-		ev, ok := gtx.Event(pointer.Filter{Target: &u.splitTag, Kinds: pointer.Press | pointer.Drag | pointer.Release | pointer.Enter | pointer.Leave})
+		ev, ok := gtx.Event(pointer.Filter{Target: &u.splitTag, Kinds: pointer.Press | pointer.Drag | pointer.Release | pointer.Cancel | pointer.Enter | pointer.Leave})
 		if !ok {
 			break
 		}
@@ -666,12 +729,15 @@ func (a *App) drawSidebar(gtx layout.Context) {
 		case pointer.Leave:
 			u.hoverSplit = false
 		case pointer.Press:
+			if e.Buttons != pointer.ButtonPrimary {
+				continue
+			}
 			u.dragSplit = true
 		case pointer.Drag:
 			if u.dragSplit {
 				a.sidebarDp = max(140, (e.Position.X-float32(r.Min.X))/gtx.Metric.PxPerDp)
 			}
-		case pointer.Release:
+		case pointer.Release, pointer.Cancel:
 			u.dragSplit = false
 		}
 	}

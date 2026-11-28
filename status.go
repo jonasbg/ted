@@ -25,6 +25,10 @@ func (a *App) statusClick(id string) {
 		a.toggleJSONView(b)
 	case "pos":
 		a.gotoLinePrompt()
+	case "imgzoom":
+		if b.image != nil {
+			b.image.toggleZoom()
+		}
 	case "csv":
 		if st, ok := b.selectionStats(); ok {
 			a.setMsg("%s", st.detail())
@@ -123,6 +127,9 @@ func (a *App) statusClick(id string) {
 // convertIndent rewrites leading whitespace to tabs or spaces using the
 // buffer's indent width, as one undo step. It returns lines changed.
 func (b *Buffer) convertIndent(toTabs bool) int {
+	if b.readOnly {
+		return 0
+	}
 	w := len(b.indent)
 	if b.indent == "\t" {
 		w = tabW

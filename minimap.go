@@ -26,9 +26,9 @@ type minimapState struct {
 	dragOff  float32
 	hover    bool
 
-	// cached drawing, re-recorded when any input changes
-	ops   op.Ops
-	call  op.CallOp
+	// cached rasterized minimap image, re-rendered when any input changes
+	imgOp paint.ImageOp
+	imgSz image.Point
 	key   minimapKey
 	valid bool
 }
@@ -39,6 +39,7 @@ type minimapKey struct {
 	first, n        int
 	w, h, lh, cw    int
 	theme           *Theme
+	query           string
 }
 
 // showMinimap reports whether there is room for a minimap in an editor of
@@ -76,7 +77,7 @@ func (a *App) drawMinimap(gtx layout.Context, b *Buffer, maxVy float32) {
 
 	sliderTop := func() float32 { return b.vy * slope }
 	for {
-		ev, ok := gtx.Event(pointer.Filter{Target: &m.tag, Kinds: pointer.Press | pointer.Drag | pointer.Release | pointer.Enter | pointer.Leave | pointer.Scroll,
+		ev, ok := gtx.Event(pointer.Filter{Target: &m.tag, Kinds: pointer.Press | pointer.Drag | pointer.Release | pointer.Cancel | pointer.Enter | pointer.Leave | pointer.Scroll,
 			ScrollY: pointer.ScrollRange{Min: -1 << 20, Max: 1 << 20}})
 		if !ok {
 			break
@@ -96,6 +97,9 @@ func (a *App) drawMinimap(gtx layout.Context, b *Buffer, maxVy float32) {
 		case pointer.Scroll:
 			b.vy = max(0, min(maxVy, b.vy+e.Scroll.Y))
 		case pointer.Press:
+			if e.Buttons != pointer.ButtonPrimary {
+				continue
+			}
 			st := sliderTop()
 			if y >= st && y <= st+sliderH {
 				m.dragOff = y - st
@@ -114,7 +118,7 @@ func (a *App) drawMinimap(gtx layout.Context, b *Buffer, maxVy float32) {
 			if m.dragging {
 				setTop(y - m.dragOff)
 			}
-		case pointer.Release:
+		case pointer.Release, pointer.Cancel:
 			m.dragging = false
 		}
 	}
@@ -126,17 +130,26 @@ func (a *App) drawMinimap(gtx layout.Context, b *Buffer, maxVy float32) {
 	off := int(mmTop) % lh
 	rows := r.Dy()/lh + 2
 
+	var findQ string
+	var findRunes []rune
+	if a.find != nil && len(a.find.in.r) > 0 {
+		findRunes = a.find.in.r
+		findQ = string(findRunes)
+	}
 	st := clip.Rect(r).Push(ops)
-	key := minimapKey{b, b.version, b.hl.version, b.hl.from, first, n, r.Dx(), r.Dy(), lh, cw, th}
+	key := minimapKey{b, b.version, b.hl.version, b.hl.from, first, n, r.Dx(), r.Dy(), lh, cw, th, findQ}
 	if !m.valid || m.key != key {
-		m.ops.Reset()
-		rec := op.Record(&m.ops)
-		a.paintMinimapLines(&m.ops, b, first, rows, r.Dx(), lh, cw)
-		m.call = rec.Stop()
+		img := a.rasterMinimap(b, first, rows, r.Dx(), lh, cw, findRunes)
+		m.imgOp = paint.NewImageOp(img)
+		m.imgOp.Filter = paint.FilterNearest
+		m.imgSz = img.Bounds().Size()
 		m.key, m.valid = key, true
 	}
-	t := op.Offset(image.Pt(r.Min.X+gtx.Dp(6), r.Min.Y-off)).Push(ops)
-	m.call.Add(ops)
+	t := op.Offset(image.Pt(r.Min.X, r.Min.Y-off)).Push(ops)
+	cl := clip.Rect(image.Rectangle{Max: m.imgSz}).Push(ops)
+	m.imgOp.Add(ops)
+	paint.PaintOp{}.Add(ops)
+	cl.Pop()
 	t.Pop()
 
 	// caret line
@@ -161,12 +174,45 @@ func (a *App) drawMinimap(gtx layout.Context, b *Buffer, maxVy float32) {
 	st.Pop()
 }
 
-// paintMinimapLines draws rows starting at line first as small blocks, one
-// per run of same-coloured non-space characters.
-func (a *App) paintMinimapLines(ops *op.Ops, b *Buffer, first, rows, w, lh, cw int) {
+func premulRGBA(c color.NRGBA) [4]byte {
+	a := uint32(c.A)
+	return [4]byte{byte(uint32(c.R) * a / 255), byte(uint32(c.G) * a / 255), byte(uint32(c.B) * a / 255), c.A}
+}
+
+func fillPix(img *image.RGBA, x0, y0, x1, y1 int, px [4]byte) {
+	b := img.Bounds()
+	x0 = max(b.Min.X, x0)
+	y0 = max(b.Min.Y, y0)
+	x1 = min(b.Max.X, x1)
+	y1 = min(b.Max.Y, y1)
+	if x0 >= x1 || y0 >= y1 {
+		return
+	}
+	for y := y0; y < y1; y++ {
+		off := img.PixOffset(x0, y)
+		for x := x0; x < x1; x++ {
+			img.Pix[off] = px[0]
+			img.Pix[off+1] = px[1]
+			img.Pix[off+2] = px[2]
+			img.Pix[off+3] = px[3]
+			off += 4
+		}
+	}
+}
+
+// rasterMinimap renders rows starting at line first into a single RGBA image
+// instead of emitting thousands of individual vector draw ops.
+func (a *App) rasterMinimap(b *Buffer, first, rows, w, lh, cw int, findQ []rune) *image.RGBA {
 	th := a.th
-	maxCols := (w - 8) / cw
+	imgW := max(1, w)
+	imgH := max(1, rows*lh)
+	img := image.NewRGBA(image.Rect(0, 0, imgW, imgH))
+	padX := min(6, imgW/4)
+	maxCols := max(1, (imgW-padX-2)/cw)
 	blockH := max(1, lh-1)
+	cs := caseSensitive(findQ)
+	matchPx := premulRGBA(withA(th.orange, 0xd8))
+
 	for i := 0; i < rows; i++ {
 		li := first + i
 		if li >= len(b.lines) {
@@ -176,7 +222,7 @@ func (a *App) paintMinimapLines(ops *op.Ops, b *Buffer, first, rows, w, lh, cw i
 		y := i * lh
 		if b.diffView {
 			if c := diffLineBg(th, line); c.A != 0 {
-				fill(ops, image.Rect(-6, y, w, y+lh), c)
+				fillPix(img, 0, y, imgW, y+lh, premulRGBA(c))
 			}
 		}
 		spans := a.spansFor(b, li)
@@ -186,7 +232,7 @@ func (a *App) paintMinimapLines(ops *op.Ops, b *Buffer, first, rows, w, lh, cw i
 		var runCol color.NRGBA
 		flush := func(end int) {
 			if runStart >= 0 && end > runStart {
-				paint.FillShape(ops, withA(runCol, 0x9a), clip.Rect(image.Rect(runStart*cw, y, end*cw, y+blockH)).Op())
+				fillPix(img, padX+runStart*cw, y, padX+end*cw, y+blockH, premulRGBA(withA(runCol, 0x9a)))
 			}
 			runStart = -1
 		}
@@ -216,7 +262,31 @@ func (a *App) paintMinimapLines(ops *op.Ops, b *Buffer, first, rows, w, lh, cw i
 			col += wdt
 		}
 		flush(min(col, maxCols))
+		if len(findQ) > 0 && hasMatchInLine(line, findQ, cs) {
+			// Subtle match marker tick at the right edge of the minimap.
+			fillPix(img, imgW-max(4, cw*4), y, imgW, y+max(lh, 2), matchPx)
+		}
 	}
+	return img
+}
+
+func hasMatchInLine(line, q []rune, cs bool) bool {
+	if len(q) == 0 || len(q) > len(line) {
+		return false
+	}
+	// Cap scan length on extremely long lines to keep minimap rasterization fast.
+	limit := min(len(line), 8000)
+outer:
+	for i := 0; i+len(q) <= limit; i++ {
+		for j, r := range q {
+			c := line[i+j]
+			if c != r && (cs || unicode.ToLower(c) != unicode.ToLower(r)) {
+				continue outer
+			}
+		}
+		return true
+	}
+	return false
 }
 
 // scrollVisibility returns how visible (0 to 1) scroll indicators should be:

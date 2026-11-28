@@ -40,45 +40,67 @@ func newTree(root string) *Tree {
 	return t
 }
 
-func (t *Tree) load(n *node) {
-	entries, err := os.ReadDir(n.path)
-	n.loaded = true
+type treeEntry struct {
+	name  string
+	isDir bool
+}
+
+// readDirEntries reads and sorts a directory's visible entries; safe to run off
+// the UI goroutine.
+func readDirEntries(dir string, showHidden bool) []treeEntry {
+	entries, err := os.ReadDir(dir)
 	if err != nil {
-		n.children = nil
-		return
+		return nil
 	}
-	old := map[string]*node{}
-	for _, c := range n.children {
-		old[c.name] = c
-	}
-	kids := make([]*node, 0, len(entries))
+	out := make([]treeEntry, 0, len(entries))
 	for _, e := range entries {
 		name := e.Name()
 		if alwaysHidden[name] {
 			continue
 		}
-		if !t.showHidden && strings.HasPrefix(name, ".") {
+		if !showHidden && strings.HasPrefix(name, ".") {
 			continue
 		}
 		isDir := e.IsDir()
 		if e.Type()&os.ModeSymlink != 0 {
-			if st, err := os.Stat(filepath.Join(n.path, name)); err == nil {
+			if st, err := os.Stat(filepath.Join(dir, name)); err == nil {
 				isDir = st.IsDir()
 			}
 		}
-		if c, ok := old[name]; ok && c.isDir == isDir {
+		out = append(out, treeEntry{name: name, isDir: isDir})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].isDir != out[j].isDir {
+			return out[i].isDir
+		}
+		return naturalLess(strings.ToLower(out[i].name), strings.ToLower(out[j].name))
+	})
+	return out
+}
+
+func (t *Tree) applyEntries(n *node, entries []treeEntry) {
+	n.loaded = true
+	if entries == nil {
+		n.children = nil
+		return
+	}
+	old := make(map[string]*node, len(n.children))
+	for _, c := range n.children {
+		old[c.name] = c
+	}
+	kids := make([]*node, 0, len(entries))
+	for _, e := range entries {
+		if c, ok := old[e.name]; ok && c.isDir == e.isDir {
 			kids = append(kids, c)
 			continue
 		}
-		kids = append(kids, &node{name: name, path: filepath.Join(n.path, name), isDir: isDir, parent: n, depth: n.depth + 1})
+		kids = append(kids, &node{name: e.name, path: filepath.Join(n.path, e.name), isDir: e.isDir, parent: n, depth: n.depth + 1})
 	}
-	sort.Slice(kids, func(i, j int) bool {
-		if kids[i].isDir != kids[j].isDir {
-			return kids[i].isDir
-		}
-		return naturalLess(strings.ToLower(kids[i].name), strings.ToLower(kids[j].name))
-	})
 	n.children = kids
+}
+
+func (t *Tree) load(n *node) {
+	t.applyEntries(n, readDirEntries(n.path, t.showHidden))
 }
 
 func naturalLess(a, b string) bool {

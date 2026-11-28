@@ -147,27 +147,43 @@ func (a *App) openVirtual(key, title string, src func() string, preview bool) {
 	a.focus = focusEditor
 }
 
-func (a *App) updateVirtual(b *Buffer) {
-	if b.virtualSrc == nil {
-		return
-	}
-	txt := b.virtualSrc()
+func (a *App) applyVirtualText(b *Buffer, txt string) {
 	if txt == b.text() {
 		return
 	}
 	cur, vy := b.cur, b.vy
-	b.setContent([]byte(txt))
+	b.setContentString(txt)
 	b.cur = b.clamp(cur)
 	b.vy = vy
 	b.selecting = false
 }
 
-// refreshVirtual regenerates open working-tree diffs (they change as you edit).
+func (a *App) updateVirtual(b *Buffer) {
+	if b.virtualSrc == nil {
+		return
+	}
+	a.applyVirtualText(b, b.virtualSrc())
+}
+
+// refreshVirtual regenerates open working-tree diffs off the UI goroutine
+// so background git polls never stall frame rendering.
 func (a *App) refreshVirtual() {
 	for _, b := range a.bufs {
-		if strings.HasPrefix(b.virtualKey, "diff:") {
-			a.updateVirtual(b)
+		if !strings.HasPrefix(b.virtualKey, "diff:") || b.virtualSrc == nil || b.reloading {
+			continue
 		}
+		b.reloading = true
+		src := b.virtualSrc
+		go func(buf *Buffer) {
+			txt := src()
+			a.post(func() {
+				buf.reloading = false
+				if a.indexOf(buf) < 0 {
+					return
+				}
+				a.applyVirtualText(buf, txt)
+			})
+		}(b)
 	}
 }
 
@@ -219,7 +235,7 @@ func (a *App) drawActivityBar(gtx layout.Context) {
 		if e.Kind == pointer.Leave {
 			s.tabHover = -1
 		}
-		if e.Kind == pointer.Press && s.tabHover >= 0 {
+		if e.Kind == pointer.Press && e.Buttons == pointer.ButtonPrimary && s.tabHover >= 0 {
 			if s.tabHover == activitySettings {
 				a.openSettings()
 				continue
@@ -336,6 +352,9 @@ func (a *App) drawChanges(gtx layout.Context, list image.Rectangle) {
 		case pointer.Scroll:
 			s.vy = max(0, min(s.vy+e.Scroll.Y, maxVy))
 		case pointer.Press:
+			if e.Buttons != pointer.ButtonPrimary {
+				continue
+			}
 			a.focus = focusTree
 			if idx < 0 {
 				continue
@@ -410,9 +429,10 @@ func (a *App) drawChanges(gtx layout.Context, list image.Rectangle) {
 			nameF = fUIItalic
 		}
 		nm := a.tc.truncate(nameF, u.uiPx, avail, name)
-		tx += a.tc.draw(ops, nameF, u.uiPx, tx, bl, nm, th.fg)
-		if dir != "." && avail-a.tc.width(nameF, u.uiPx, nm) > gtx.Dp(30) {
-			d := a.tc.truncateLeft(fUI, gtx.Sp(11), avail-a.tc.width(nameF, u.uiPx, nm)-gtx.Dp(8), dir)
+		nw := a.tc.draw(ops, nameF, u.uiPx, tx, bl, nm, th.fg)
+		tx += nw
+		if dir != "." && avail-nw > gtx.Dp(30) {
+			d := a.tc.truncateLeft(fUI, gtx.Sp(11), avail-nw-gtx.Dp(8), dir)
 			a.tc.draw(ops, fUI, gtx.Sp(11), tx+gtx.Dp(8), bl, d, th.dim)
 		}
 		a.tc.draw(ops, fUIBold, gtx.Sp(11), list.Max.X-gtx.Dp(14)-lw, bl, string(letter), col)
@@ -454,7 +474,7 @@ func (a *App) drawHistory(gtx layout.Context, list image.Rectangle) {
 		}
 		e := ev.(pointer.Event)
 		idx := int((e.Position.Y - float32(list.Min.Y) + s.histVy) / float32(rowH))
-		if idx >= len(s.commits) {
+		if e.Position.Y < float32(list.Min.Y) || idx < 0 || idx >= len(s.commits) {
 			idx = -1
 		}
 		switch e.Kind {
@@ -465,6 +485,9 @@ func (a *App) drawHistory(gtx layout.Context, list image.Rectangle) {
 		case pointer.Scroll:
 			s.histVy = max(0, min(s.histVy+e.Scroll.Y, maxVy))
 		case pointer.Press:
+			if e.Buttons != pointer.ButtonPrimary {
+				continue
+			}
 			a.focus = focusTree
 			if idx >= 0 {
 				s.histSel = idx

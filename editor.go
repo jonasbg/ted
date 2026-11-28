@@ -66,11 +66,11 @@ func (a *App) drawEditor(gtx layout.Context, b *Buffer) {
 	}
 	b.vy = max(0, min(b.vy, maxVy))
 	b.vx = max(0, min(b.vx, maxVx))
-	if b != a.lastScrollBuf || b.vy != a.lastVy {
+	if b != a.lastScrollBuf || b.vy != a.lastVy || b.vx != a.lastVx {
 		if b == a.lastScrollBuf {
 			a.scrollAt = gtx.Now // the view moved: show scroll indicators
 		}
-		a.lastScrollBuf, a.lastVy = b, b.vy
+		a.lastScrollBuf, a.lastVy, a.lastVx = b, b.vy, b.vx
 	}
 	first := int(b.vy) / lineH
 	off := int(b.vy) % lineH
@@ -198,17 +198,63 @@ func (a *App) drawEditor(gtx layout.Context, b *Buffer) {
 				fill(ops, image.Rect(x0, y, x1, y+lineH), th.selection)
 			}
 		}
-		// search matches
-		if len(q) > 0 {
-			for _, m := range matchesInLine(line, q, cs) {
-				p := Pos{li, m}
-				if hasSel && p == selS {
-					if a.find != nil {
-						strokeRRect(ops, image.Rect(colX(visCol(line, m)), y+1, colX(visCol(line, m+len(q))), y+lineH-1), 2, float32(gtx.Dp(1)), th.matchCur)
-					}
+		// search matches: single forward pass clipped to visible columns [c0, c1]
+		// so long lines with many matches stay O(visible) instead of O(matches * lineLen).
+		if len(q) > 0 && len(q) <= len(line) {
+			vc := 0
+			qlen := len(q)
+			for i := 0; i+qlen <= len(line); {
+				if vc > c1 {
+					break
+				}
+				r := line[i]
+				rw := 1
+				if r == '\t' {
+					rw = tabW - vc%tabW
+				} else if r >= 0x7f {
+					rw = runeW(r)
+				}
+				if vc+qlen*2 < c0 { // fast skip well before viewport
+					vc += rw
+					i++
 					continue
 				}
-				fill(ops, image.Rect(colX(visCol(line, m)), y+1, colX(visCol(line, m+len(q))), y+lineH-1), th.match)
+				matched := true
+				for j, qr := range q {
+					c := line[i+j]
+					if c != qr && (cs || unicode.ToLower(c) != unicode.ToLower(qr)) {
+						matched = false
+						break
+					}
+				}
+				if !matched {
+					vc += rw
+					i++
+					continue
+				}
+				startVC := vc
+				for j := 0; j < qlen; j++ {
+					mr := line[i+j]
+					if mr == '\t' {
+						vc += tabW - vc%tabW
+					} else if mr < 0x7f {
+						vc++
+					} else {
+						vc += runeW(mr)
+					}
+				}
+				if vc >= c0 && startVC <= c1 {
+					p := Pos{li, i}
+					mr := image.Rect(colX(startVC), y+1, colX(vc), y+lineH-1)
+					if hasSel && p == selS {
+						if a.find != nil {
+							strokeRRect(ops, mr, 2, float32(gtx.Dp(1)), th.matchCur)
+						}
+					} else {
+						fill(ops, mr, th.match)
+					}
+				}
+				i += qlen
 			}
 		}
 		for _, p := range brs {
@@ -264,11 +310,15 @@ func (a *App) drawEditor(gtx layout.Context, b *Buffer) {
 	} else {
 		a.drawScrollbar(gtx, &b.vy, maxVy)
 	}
+	if maxVx > 0 {
+		a.drawHScrollbar(gtx, &b.vx, maxVx)
+	}
 	a.scheduleHighlight(b, visible)
 
 	// keep auto-scrolling while dragging outside the text
 	if u.dragEditor {
-		if u.dragPos.Y < float32(r.Min.Y) || u.dragPos.Y > float32(r.Max.Y) {
+		if u.dragPos.Y < float32(r.Min.Y) || u.dragPos.Y > float32(r.Max.Y) ||
+			u.dragPos.X < float32(u.text.Min.X) || u.dragPos.X > float32(u.text.Max.X) {
 			gtx.Execute(op.InvalidateCmd{At: gtx.Now.Add(16 * time.Millisecond)})
 		}
 	}
@@ -376,7 +426,7 @@ func (a *App) drawScrollbar(gtx layout.Context, vy *float32, maxVy float32) {
 	ty := float32(r.Min.Y) + *vy/maxVy*(viewH-thumbH)
 
 	for {
-		ev, ok := gtx.Event(pointer.Filter{Target: &u.thumbTag, Kinds: pointer.Press | pointer.Drag | pointer.Release | pointer.Enter | pointer.Leave})
+		ev, ok := gtx.Event(pointer.Filter{Target: &u.thumbTag, Kinds: pointer.Press | pointer.Drag | pointer.Release | pointer.Cancel | pointer.Enter | pointer.Leave})
 		if !ok {
 			break
 		}
@@ -387,6 +437,9 @@ func (a *App) drawScrollbar(gtx layout.Context, vy *float32, maxVy float32) {
 		case pointer.Leave:
 			u.hoverThumb = false
 		case pointer.Press:
+			if e.Buttons != pointer.ButtonPrimary {
+				continue
+			}
 			u.dragThumb = true
 			if e.Position.Y >= ty && e.Position.Y <= ty+thumbH {
 				u.dragThumbOff = e.Position.Y - ty
@@ -400,7 +453,7 @@ func (a *App) drawScrollbar(gtx layout.Context, vy *float32, maxVy float32) {
 				*vy = max(0, min(maxVy, p*maxVy))
 				ty = float32(r.Min.Y) + *vy/maxVy*(viewH-thumbH)
 			}
-		case pointer.Release:
+		case pointer.Release, pointer.Cancel:
 			u.dragThumb = false
 		}
 	}
@@ -417,6 +470,68 @@ func (a *App) drawScrollbar(gtx layout.Context, vy *float32, maxVy float32) {
 	st := clip.Rect(track).Push(ops)
 	pointer.CursorDefault.Add(ops)
 	event.Op(ops, &u.thumbTag)
+	st.Pop()
+}
+
+func (a *App) drawHScrollbar(gtx layout.Context, vx *float32, maxVx float32) {
+	ops := gtx.Ops
+	u := &a.ui
+	r := u.text
+	viewW := float32(r.Dx())
+	if maxVx <= 0 || viewW <= 0 {
+		return
+	}
+	contentW := maxVx + viewW
+	trackH := gtx.Dp(10)
+	track := image.Rect(r.Min.X, r.Max.Y-trackH, r.Max.X, r.Max.Y)
+	thumbW := max(float32(gtx.Dp(28)), viewW*viewW/contentW)
+	if viewW <= thumbW {
+		return
+	}
+	tx := float32(r.Min.X) + *vx/maxVx*(viewW-thumbW)
+	for {
+		ev, ok := gtx.Event(pointer.Filter{Target: &u.hthumbTag, Kinds: pointer.Press | pointer.Drag | pointer.Release | pointer.Cancel | pointer.Enter | pointer.Leave})
+		if !ok {
+			break
+		}
+		e := ev.(pointer.Event)
+		switch e.Kind {
+		case pointer.Enter:
+			u.hoverHThumb = true
+		case pointer.Leave:
+			u.hoverHThumb = false
+		case pointer.Press:
+			if e.Buttons != pointer.ButtonPrimary {
+				continue
+			}
+			u.dragHThumb = true
+			if e.Position.X >= tx && e.Position.X <= tx+thumbW {
+				u.dragHThumbOff = e.Position.X - tx
+			} else {
+				u.dragHThumbOff = thumbW / 2
+			}
+			fallthrough
+		case pointer.Drag:
+			if u.dragHThumb {
+				p := (e.Position.X - u.dragHThumbOff - float32(r.Min.X)) / (viewW - thumbW)
+				*vx = max(0, min(maxVx, p*maxVx))
+				tx = float32(r.Min.X) + *vx/maxVx*(viewW-thumbW)
+			}
+		case pointer.Release, pointer.Cancel:
+			u.dragHThumb = false
+		}
+	}
+	alpha := float32(0x38)
+	if u.dragHThumb {
+		alpha = 0x70
+	}
+	thumb := image.Rect(int(tx), track.Min.Y+gtx.Dp(2), int(tx+thumbW), track.Max.Y-gtx.Dp(2))
+	if vis := a.scrollVisibility(gtx, u.hoverHThumb || u.dragHThumb); vis > 0 {
+		rrect(ops, thumb, gtx.Dp(3), withA(a.th.fg, uint8(alpha*vis)))
+	}
+	st := clip.Rect(track).Push(ops)
+	pointer.CursorDefault.Add(ops)
+	event.Op(ops, &u.hthumbTag)
 	st.Pop()
 }
 
@@ -494,12 +609,24 @@ func (a *App) editorPointer(gtx layout.Context, b *Buffer, maxVy, maxVx float32)
 	// auto-scroll while the drag is held outside the view
 	if u.dragEditor {
 		r := u.editor
+		moved := false
 		step := float32(u.lineH) / 2
 		if u.dragPos.Y < float32(r.Min.Y) {
 			b.vy = max(0, b.vy-step*(1+(float32(r.Min.Y)-u.dragPos.Y)/20))
-			a.editorDrag(b)
+			moved = true
 		} else if u.dragPos.Y > float32(r.Max.Y) {
 			b.vy = min(maxVy, b.vy+step*(1+(u.dragPos.Y-float32(r.Max.Y))/20))
+			moved = true
+		}
+		hstep := float32(u.charW) * 2
+		if u.dragPos.X < float32(u.text.Min.X) && b.vx > 0 {
+			b.vx = max(0, b.vx-hstep*(1+(float32(u.text.Min.X)-u.dragPos.X)/30))
+			moved = true
+		} else if u.dragPos.X > float32(u.text.Max.X) && maxVx > 0 {
+			b.vx = min(maxVx, b.vx+hstep*(1+(u.dragPos.X-float32(u.text.Max.X))/30))
+			moved = true
+		}
+		if moved {
 			a.editorDrag(b)
 		}
 	}
@@ -544,6 +671,7 @@ func (a *App) editorClick(b *Buffer, e pointer.Event) {
 		} else {
 			b.cur = Pos{p.L, len(b.lines[p.L])}
 		}
+		u.dragAnchorS, u.dragAnchorE = b.anchor, b.cur
 		b.selecting = true
 		u.clickCount = 3
 	case e.Modifiers.Contain(key.ModShift):
@@ -555,6 +683,7 @@ func (a *App) editorClick(b *Buffer, e pointer.Event) {
 	case u.clickCount == 2:
 		s, en := b.wordBounds(p)
 		b.anchor, b.cur = Pos{p.L, s}, Pos{p.L, en}
+		u.dragAnchorS, u.dragAnchorE = b.anchor, b.cur
 		b.selecting = true
 	case u.clickCount >= 3:
 		b.anchor = Pos{p.L, 0}
@@ -563,6 +692,7 @@ func (a *App) editorClick(b *Buffer, e pointer.Event) {
 		} else {
 			b.cur = Pos{p.L, len(b.lines[p.L])}
 		}
+		u.dragAnchorS, u.dragAnchorE = b.anchor, b.cur
 		b.selecting = true
 	default:
 		b.cur, b.anchor = p, p
@@ -580,18 +710,24 @@ func (a *App) editorDrag(b *Buffer) {
 	switch {
 	case u.clickCount == 2:
 		s, e := b.wordBounds(p)
-		if p.Less(b.anchor) {
+		if p.Less(u.dragAnchorS) {
+			b.anchor = u.dragAnchorE
 			b.cur = Pos{p.L, s}
 		} else {
+			b.anchor = u.dragAnchorS
 			b.cur = Pos{p.L, e}
 		}
 	case u.clickCount >= 3:
-		if p.Less(b.anchor) {
+		if p.Less(u.dragAnchorS) {
+			b.anchor = u.dragAnchorE
 			b.cur = Pos{p.L, 0}
-		} else if p.L+1 < len(b.lines) {
-			b.cur = Pos{p.L + 1, 0}
 		} else {
-			b.cur = Pos{p.L, len(b.lines[p.L])}
+			b.anchor = u.dragAnchorS
+			if p.L+1 < len(b.lines) {
+				b.cur = Pos{p.L + 1, 0}
+			} else {
+				b.cur = Pos{p.L, len(b.lines[p.L])}
+			}
 		}
 	default:
 		b.cur = p

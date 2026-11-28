@@ -85,8 +85,9 @@ type Buffer struct {
 	widest         int         // cached width of the widest line, in columns
 	lineWidths     []int       // width of each line, in columns; nil until first display
 	widthCount     map[int]int // how many lines have each width
-	lineStarts     []int
-	lineStartsVer  int
+	blockLens      []int       // chunked rune counts (len(line)+1) per lineBlockSize lines
+	blockVer       int
+	blockLines     int
 
 	undo    []undoGroup
 	redo    []undoGroup
@@ -105,6 +106,7 @@ type Buffer struct {
 	spansPending      []b64Span // decoded regions before the edit in progress
 	spansNoted        bool
 	inUndo            bool
+	inB64Encode       bool
 	reloading         bool // a large file is being read in the background
 }
 
@@ -140,12 +142,17 @@ func loadBuffer(path string) (*Buffer, error) {
 	if bytes.IndexByte(head, 0) >= 0 {
 		return nil, errBinary
 	}
-	if out, ok := structuredJSON(path, string(data), "  "); ok {
-		crlf := bytes.Contains(data, []byte("\r\n"))
-		b.setContent([]byte(out))
-		b.crlf, b.jsonView = crlf, true
+	s := unsafe.String(unsafe.SliceData(data), len(data))
+	if (isJSONPath(path) || unclaimedName(path)) && len(data) <= 64<<20 {
+		if out, ok := structuredJSON(path, s, "  "); ok {
+			crlf := bytes.Contains(data, []byte("\r\n"))
+			b.setContentString(out)
+			b.crlf, b.jsonView = crlf, true
+		} else {
+			b.setContentString(s)
+		}
 	} else {
-		b.setContent(data)
+		b.setContentString(s)
 	}
 	b.mode = st.Mode().Perm()
 	b.modTime = st.ModTime()
@@ -154,13 +161,17 @@ func loadBuffer(path string) (*Buffer, error) {
 }
 
 func (b *Buffer) setContent(data []byte) {
-	s := string(data)
+	b.setContentString(string(data))
+}
+
+func (b *Buffer) setContentString(s string) {
 	b.crlf = strings.Contains(s, "\r\n")
 	if b.crlf {
 		s = strings.ReplaceAll(s, "\r\n", "\n")
 	}
 	b.lines = splitLines(s)
 	b.lineWidths, b.widthCount = nil, nil
+	b.blockLens = nil
 	b.widest = 0
 	b.indent = detectIndent(b.lines, b.path)
 	b.version++
@@ -325,9 +336,11 @@ func (b *Buffer) rawInsert(p Pos, text []rune) Pos {
 	}
 	segs = append(segs, text[start:])
 	if len(segs) == 1 {
+		oldLen := len(line)
 		nl := make([]rune, 0, len(head)+len(text)+len(tail))
 		nl = append(append(append(nl, head...), text...), tail...)
 		b.lines[p.L] = nl
+		b.updateBlockSingle(p.L, len(nl)-oldLen)
 		b.updateWidths(p.L, 1, 1)
 		end := Pos{p.L, p.C + len(text)}
 		b.shiftB64Insert(p, end)
@@ -342,6 +355,7 @@ func (b *Buffer) rawInsert(p Pos, text []rune) Pos {
 	newLines[len(segs)-1] = append(append([]rune(nil), last...), tail...)
 	b.hl.spliceLines(p.L+1, 0, len(segs)-1)
 	b.lines = slices.Replace(b.lines, p.L, p.L+1, newLines...)
+	b.blockLens = nil
 	b.updateWidths(p.L, 1, len(newLines))
 	end := Pos{p.L + len(segs) - 1, len(last)}
 	b.shiftB64Insert(p, end)
@@ -377,12 +391,15 @@ func (b *Buffer) rawDelete(a, c Pos) []rune {
 	nl := make([]rune, 0, len(head)+len(tail))
 	nl = append(append(nl, head...), tail...)
 	if a.L == c.L {
+		oldLen := len(b.lines[a.L])
 		b.lines[a.L] = nl
+		b.updateBlockSingle(a.L, len(nl)-oldLen)
 		b.updateWidths(a.L, 1, 1)
 		return removed
 	}
 	b.hl.spliceLines(a.L+1, c.L-a.L, 0)
 	b.lines = slices.Replace(b.lines, a.L, c.L+1, nl)
+	b.blockLens = nil
 	b.updateWidths(a.L, c.L-a.L+1, 1)
 	return removed
 }
@@ -406,6 +423,50 @@ func (b *Buffer) pushEdit(e edit, kind string) {
 	}
 	b.nextID++
 	b.undo = append(b.undo, undoGroup{id: b.nextID, edits: []edit{e}, when: now, kind: kind, before: b.takeSpans()})
+	b.trimUndo()
+}
+
+// maxUndoRunes bounds memory held by the undo history (~128 MB of runes),
+// while always keeping at least the most recent undo group.
+const maxUndoRunes = 32 << 20
+
+func (b *Buffer) trimUndo() {
+	if len(b.undo) <= 1 {
+		return
+	}
+	total := 0
+	for i := len(b.undo) - 1; i >= 0; i-- {
+		for _, e := range b.undo[i].edits {
+			total += len(e.text)
+		}
+		if total > maxUndoRunes && i < len(b.undo)-1 {
+			drop := i + 1
+			for _, g := range b.undo[:drop] {
+				if g.id == b.savedID {
+					b.savedID = -1
+				}
+			}
+			if b.savedID == 0 {
+				b.savedID = -1
+			}
+			b.undo = append([]undoGroup(nil), b.undo[drop:]...)
+			return
+		}
+	}
+}
+
+// setLastCurA adjusts the post-edit cursor recorded on the newest undo edit,
+// so redo lands at the same position as the original operation (e.g. inside an
+// auto-paired bracket or between braces on Enter).
+func (b *Buffer) setLastCurA(p Pos) {
+	if len(b.undo) == 0 {
+		return
+	}
+	g := &b.undo[len(b.undo)-1]
+	if len(g.edits) == 0 {
+		return
+	}
+	g.edits[len(g.edits)-1].curA = p
 }
 
 // breakUndo makes the next edit start a new undo group.
@@ -468,6 +529,7 @@ func (b *Buffer) replaceRange(a, c Pos, text []rune) Pos {
 		b.redo = nil
 		b.nextID++
 		b.undo = append(b.undo, undoGroup{id: b.nextID, edits: g, when: time.Now(), before: b.takeSpans()})
+		b.trimUndo()
 	}
 	return end
 }
@@ -710,14 +772,7 @@ func (b *Buffer) applyDiff(df textDiff) bool {
 }
 
 func (b *Buffer) posFromOffset(off int) Pos {
-	for i, l := range b.lines {
-		if off <= len(l) {
-			return Pos{i, off}
-		}
-		off -= len(l) + 1
-	}
-	last := len(b.lines) - 1
-	return Pos{last, len(b.lines[last])}
+	return b.posAt(off)
 }
 
 func runesEq(a, b []rune) bool {

@@ -22,6 +22,10 @@ type csvState struct {
 	stats    csvStats
 	statsOK  bool // stats match statsKey
 
+	colKey   [3]int // (version, cur.L, cur.C)
+	colLabel string
+	colOK    bool
+
 	// scratch reused across lines while drawing, so a frame doesn't
 	// allocate per visible line
 	fieldBuf []field
@@ -144,16 +148,35 @@ func parseNumber(s string) (float64, bool) {
 	if v, err := strconv.ParseFloat(s, 64); err == nil {
 		return v, !math.IsNaN(v) && !math.IsInf(v, 0)
 	}
+	neg := false
+	if strings.HasPrefix(s, "-") {
+		neg = true
+		s = strings.TrimSpace(s[1:])
+	} else if strings.HasPrefix(s, "+") {
+		s = strings.TrimSpace(s[1:])
+	}
 	s = strings.TrimLeft(s, "$€£¥")
+	s = strings.TrimSpace(s)
+	if !neg && strings.HasPrefix(s, "-") {
+		neg = true
+		s = s[1:]
+	}
 	s = strings.TrimSuffix(s, "%")
 	s = strings.ReplaceAll(s, " ", "")
 	s = strings.ReplaceAll(s, "_", "")
 	if s == "" {
 		return 0, false
 	}
-	if strings.Count(s, ",") == 1 && !strings.Contains(s, ".") {
+	comma := strings.LastIndexByte(s, ',')
+	dot := strings.LastIndexByte(s, '.')
+	switch {
+	case comma >= 0 && dot >= 0 && comma > dot:
+		// European thousands + decimal comma, e.g. 1.234,56
+		s = strings.ReplaceAll(s, ".", "")
+		s = strings.Replace(s, ",", ".", 1)
+	case strings.Count(s, ",") == 1 && dot < 0:
 		// 3,5 is a decimal comma; 1,234 is a thousands separator
-		if i := strings.IndexByte(s, ','); len(s)-i-1 != 3 {
+		if len(s)-comma-1 != 3 {
 			s = strings.Replace(s, ",", ".", 1)
 		}
 	}
@@ -161,6 +184,9 @@ func parseNumber(s string) (float64, bool) {
 	v, err := strconv.ParseFloat(s, 64)
 	if err != nil || math.IsNaN(v) || math.IsInf(v, 0) {
 		return 0, false
+	}
+	if neg {
+		v = -v
 	}
 	return v, true
 }
@@ -365,11 +391,16 @@ func (st csvStats) detail() string {
 
 // columnLabel names the field under the caret, e.g. "Field 3: price".
 func (b *Buffer) columnLabel() string {
-	fs := csvFields(b.lines[b.cur.L], b.csv.delim)
+	cs := b.csv
+	key := [3]int{b.version, b.cur.L, b.cur.C}
+	if cs.colOK && cs.colKey == key {
+		return cs.colLabel
+	}
+	fs := csvFields(b.lines[b.cur.L], cs.delim)
 	i := fieldAt(fs, b.cur.C)
 	s := "Field " + strconv.Itoa(i+1)
 	if len(b.lines) > 1 {
-		if hs := csvFields(b.lines[0], b.csv.delim); i < len(hs) {
+		if hs := csvFields(b.lines[0], cs.delim); i < len(hs) {
 			if name := cellText(b.lines[0], hs[i]); name != "" && b.cur.L > 0 {
 				if len([]rune(name)) > 24 {
 					name = string([]rune(name)[:23]) + "…"
@@ -378,6 +409,7 @@ func (b *Buffer) columnLabel() string {
 			}
 		}
 	}
+	cs.colKey, cs.colLabel, cs.colOK = key, s, true
 	return s
 }
 

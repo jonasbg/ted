@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -48,7 +49,7 @@ func (a *App) handleKeys(gtx layout.Context) {
 		if held != nil {
 			e := *held
 			held = nil
-			a.onEdit(e)
+			a.onEdit(gtx, e)
 		}
 	}
 	defer flush()
@@ -75,7 +76,7 @@ func (a *App) handleKeys(gtx layout.Context) {
 				held = &e
 				continue
 			}
-			a.onEdit(e)
+			a.onEdit(gtx, e)
 		case key.SelectionEvent:
 			if b := a.buf(); b != nil && a.focus == focusEditor && a.overlay == nil {
 				b.anchor = b.posAt(e.Start)
@@ -130,9 +131,19 @@ func (a *App) onKey(gtx layout.Context, e key.Event) {
 			return
 		case "S":
 			if b := a.buf(); b != nil {
-				a.saveBuffer(b, nil)
+				if shift {
+					a.saveBufferAs(b)
+				} else {
+					a.saveBuffer(b, nil)
+				}
 			}
 			return
+		case "T":
+			if shift {
+				a.closeOverlay()
+				a.reopenClosedTab()
+				return
+			}
 		case "W":
 			a.closeOverlay()
 			if a.buf() != nil {
@@ -182,12 +193,32 @@ func (a *App) onKey(gtx layout.Context, e key.Event) {
 				return
 			}
 		case "=", "+":
+			if b := a.buf(); b != nil && b.image != nil && a.overlay == nil {
+				z := b.image.zoom
+				if z <= 0 {
+					z = 1
+				}
+				b.image.zoom = min(16, z*1.25)
+				return
+			}
 			a.fontSp = min(40, a.fontSp+1)
 			return
 		case "-":
+			if b := a.buf(); b != nil && b.image != nil && a.overlay == nil {
+				z := b.image.zoom
+				if z <= 0 {
+					z = 1
+				}
+				b.image.zoom = max(0.1, z/1.25)
+				return
+			}
 			a.fontSp = max(8, a.fontSp-1)
 			return
 		case "0":
+			if b := a.buf(); b != nil && b.image != nil && a.overlay == nil {
+				b.image.zoom, b.image.panX, b.image.panY = 0, 0, 0
+				return
+			}
 			a.fontSp = defaultFontSp
 			return
 		case "1", "2", "3", "4", "5", "6", "7", "8", "9":
@@ -217,7 +248,12 @@ func (a *App) onKey(gtx layout.Context, e key.Event) {
 	}
 
 	if a.overlay != nil {
-		a.overlayKey(e)
+		if sc && e.Name == "V" && (a.overlay.kind == ovSearch || a.overlay.kind == ovPrompt || a.overlay.kind == ovPick) {
+			a.pasteTarget = a.focus
+			gtx.Execute(clipboard.ReadCmd{Tag: &a.keyTag})
+			return
+		}
+		a.overlayKey(gtx, e)
 		return
 	}
 	b := a.buf()
@@ -263,7 +299,7 @@ func (a *App) onKey(gtx layout.Context, e key.Event) {
 		return
 	}
 	if a.focus == focusFind && a.find != nil {
-		a.findKey(e)
+		a.findKey(gtx, e)
 		return
 	}
 	a.editorKey(gtx, b, e)
@@ -439,12 +475,16 @@ func (a *App) editorKey(gtx layout.Context, b *Buffer, e key.Event) {
 		b.selecting = false
 		a.msg = ""
 	case key.NameReturn, key.NameEnter:
+		if b.readOnly {
+			break
+		}
 		switch {
 		case sc && shift:
 			b.selecting = false
 			b.cur.C = 0
 			b.insert(append(append([]rune(nil), leadingWS(b.lines[b.cur.L])...), '\n'), "")
 			b.cur = Pos{b.cur.L - 1, len(b.lines[b.cur.L-1])}
+			b.setLastCurA(b.cur)
 		case sc:
 			b.selecting = false
 			b.cur.C = len(b.lines[b.cur.L])
@@ -560,6 +600,10 @@ func (a *App) onPaste(s string) {
 	if b == nil || s == "" || b.previewing() {
 		return
 	}
+	if b.readOnly {
+		a.setMsg("%s is a read-only view", b.name())
+		return
+	}
 	if b.clearBlock() {
 		a.setMsg("Cell selection cleared; paste goes at the caret")
 	}
@@ -584,7 +628,7 @@ func (a *App) onPaste(s string) {
 }
 
 // onEdit receives typed text from the platform input system.
-func (a *App) onEdit(e key.EditEvent) {
+func (a *App) onEdit(gtx layout.Context, e key.EditEvent) {
 	if e.Text == "\n" || e.Text == "\r" || e.Text == "\t" {
 		return // handled as key events
 	}
@@ -600,7 +644,7 @@ func (a *App) onEdit(e key.EditEvent) {
 	if b == nil || a.focus == focusTree {
 		if a.sideView == sideFiles {
 			for _, r := range e.Text {
-				a.treeChar(r)
+				a.treeChar(gtx, r)
 			}
 		}
 		return
@@ -689,7 +733,7 @@ func (a *App) treeKey(gtx layout.Context, e key.Event) {
 	}
 }
 
-func (a *App) treeChar(r rune) {
+func (a *App) treeChar(gtx layout.Context, r rune) {
 	t := a.tree
 	n := t.selected()
 	a.ui.treeFollow = true
@@ -728,7 +772,9 @@ func (a *App) treeChar(r rune) {
 		t.sel = 0
 	case 'y':
 		if n != nil {
-			a.setMsg("Use %s+C to copy the path", shortcutName())
+			p := a.rel(n.path)
+			gtx.Execute(clipboard.WriteCmd{Type: "application/text", Data: io.NopCloser(strings.NewReader(p))})
+			a.setMsg("Copied path %s", p)
 		}
 	}
 }
@@ -830,11 +876,18 @@ func (a *App) treeRename(n *node) {
 		if dst == n.path {
 			return
 		}
-		if _, err := os.Stat(dst); err == nil {
-			a.setErr("%s already exists", s)
+		if stDst, err := os.Stat(dst); err == nil {
+			// Allow case-only renames on case-insensitive filesystems (e.g. macOS APFS).
+			stSrc, err2 := os.Stat(n.path)
+			if err2 != nil || !os.SameFile(stSrc, stDst) {
+				a.setErr("%s already exists", s)
+				return
+			}
+		}
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			a.setErr("%v", err)
 			return
 		}
-		os.MkdirAll(filepath.Dir(dst), 0o755)
 		if err := os.Rename(n.path, dst); err != nil {
 			a.setErr("%v", err)
 			return
@@ -842,15 +895,49 @@ func (a *App) treeRename(n *node) {
 		for _, b := range a.bufs {
 			if b.path == n.path {
 				b.path = dst
+				if !b.hl.manual {
+					b.hl.resolved = false
+					b.hl.lexer = nil
+					b.hl.spans = nil
+					b.hl.version = -1
+					b.csv = nil
+					b.resolveLexer()
+				}
 			} else if strings.HasPrefix(b.path, n.path+"/") {
 				b.path = dst + b.path[len(n.path):]
 			}
 		}
 		a.tree.refresh()
 		a.tree.reveal(dst)
+		a.refreshGit()
 		a.loadFiles()
 		a.setMsg("Renamed to %s", a.rel(dst))
 	})
+}
+
+// moveToTrash sends path to the OS Trash when available, falling back to RemoveAll.
+func moveToTrash(path string) error {
+	switch runtime.GOOS {
+	case "darwin":
+		if _, err := exec.LookPath("trash"); err == nil {
+			if exec.Command("trash", path).Run() == nil {
+				return nil
+			}
+		}
+		script := `on run argv
+			tell application "Finder" to delete (POSIX file (item 1 of argv) as alias)
+		end run`
+		if exec.Command("osascript", "-e", script, "--", path).Run() == nil {
+			return nil
+		}
+	case "linux":
+		if _, err := exec.LookPath("gio"); err == nil {
+			if exec.Command("gio", "trash", path).Run() == nil {
+				return nil
+			}
+		}
+	}
+	return os.RemoveAll(path)
 }
 
 func (a *App) treeDelete(n *node) {
@@ -863,7 +950,7 @@ func (a *App) treeDelete(n *node) {
 	}
 	a.confirm(fmt.Sprintf("Delete %s %s?", what, a.rel(n.path)), []button{
 		{"Delete", 'y', func() {
-			if err := os.RemoveAll(n.path); err != nil {
+			if err := moveToTrash(n.path); err != nil {
 				a.setErr("%v", err)
 				return
 			}
@@ -873,6 +960,7 @@ func (a *App) treeDelete(n *node) {
 				}
 			}
 			a.tree.refresh()
+			a.refreshGit()
 			a.loadFiles()
 			a.setMsg("Deleted %s", a.rel(n.path))
 		}},

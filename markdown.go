@@ -58,7 +58,17 @@ type mdState struct {
 	hoverLink int
 	images    map[string]*mdImage
 	spans     map[codeKey][][]span // highlighted code blocks, kept across relayouts
+
+	// cached parsed AST so window/splitter resize doesn't re-parse Markdown
+	astVer    int
+	astSrc    []byte
+	astRoot   gast.Node
+	astLines  []int
+	clickPos  image.Point
+	clickTime time.Time
 }
+
+var mdParser = goldmark.New(goldmark.WithExtensions(east.GFM)).Parser()
 
 type codeKey struct {
 	lang, src string
@@ -143,6 +153,7 @@ type mdItem struct {
 	s    string
 	f    face
 	px   int
+	cell int // >0: draw on an integer character grid (fenced code blocks)
 	col  color.NRGBA
 	rad  int
 	img  *mdImage
@@ -219,6 +230,7 @@ func (a *App) toggleMarkdownPreview() {
 	}
 	// free the layout, images and highlighting until the preview is back
 	md.doc, md.images, md.spans = nil, nil, nil
+	md.astRoot, md.astSrc, md.astLines = nil, nil, nil
 }
 
 func (a *App) mdBodyPx(gtx layout.Context) int { return gtx.Sp(unit.Sp(a.fontSp + 1)) }
@@ -292,7 +304,11 @@ func (a *App) drawMarkdown(gtx layout.Context, b *Buffer) {
 				a.followMdLink(b, d.links[i].dest)
 				continue
 			}
-			if u.isDoubleClick(gtx.Now, "md", 0) {
+			dbl := gtx.Now.Sub(md.clickTime) < 450*time.Millisecond &&
+				abs(p.X-md.clickPos.X) <= gtx.Dp(12) && abs(p.Y-md.clickPos.Y) <= gtx.Dp(12)
+			md.clickPos, md.clickTime = p, gtx.Now
+			if dbl {
+				md.clickTime = time.Time{}
 				line := 0
 				for _, bl := range d.blocks {
 					if bl.y > p.Y {
@@ -339,7 +355,11 @@ func (a *App) drawMarkdown(gtx layout.Context, b *Buffer) {
 func (a *App) paintMdItem(ops *op.Ops, it *mdItem, base image.Point) {
 	switch it.kind {
 	case miText:
-		a.tc.draw(ops, it.f, it.px, base.X+it.r.Min.X, base.Y+it.r.Min.Y, it.s, it.col)
+		if it.cell > 0 {
+			a.tc.drawCell(ops, it.f, it.px, it.cell, base.X+it.r.Min.X, base.Y+it.r.Min.Y, it.s, it.col)
+		} else {
+			a.tc.draw(ops, it.f, it.px, base.X+it.r.Min.X, base.Y+it.r.Min.Y, it.s, it.col)
+		}
 	case miFill:
 		rrect(ops, it.r.Add(base), it.rad, it.col)
 	case miStroke:
@@ -527,22 +547,28 @@ type mdLayout struct {
 }
 
 func (a *App) layoutMarkdown(gtx layout.Context, b *Buffer, width, px int) *mdDoc {
-	src := []byte(b.text())
-	p := goldmark.New(goldmark.WithExtensions(east.GFM)).Parser()
-	root := p.Parse(gtext.NewReader(src))
-	l := &mdLayout{a: a, gtx: gtx, th: a.th, src: src, md: b.md, px: px, first: true,
-		doc: &mdDoc{anchors: map[string]int{}, web: map[string]bool{}}}
+	md := b.md
+	if md.astRoot == nil || md.astVer != b.version {
+		src := []byte(b.text())
+		md.astSrc = src
+		md.astRoot = mdParser.Parse(gtext.NewReader(src))
+		ls := []int{0}
+		for i, c := range src {
+			if c == '\n' {
+				ls = append(ls, i+1)
+			}
+		}
+		md.astLines = ls
+		md.astVer = b.version
+	}
+	l := &mdLayout{a: a, gtx: gtx, th: a.th, src: md.astSrc, md: md, px: px, first: true,
+		lineStarts: md.astLines,
+		doc:        &mdDoc{anchors: map[string]int{}, web: map[string]bool{}}}
 	l.codePx = max(8, px*86/100)
 	if b.path != "" {
 		l.dir = filepath.Dir(b.path)
 	}
-	l.lineStarts = []int{0}
-	for i, c := range src {
-		if c == '\n' {
-			l.lineStarts = append(l.lineStarts, i+1)
-		}
-	}
-	for n := root.FirstChild(); n != nil; n = n.NextSibling() {
+	for n := md.astRoot.FirstChild(); n != nil; n = n.NextSibling() {
 		l.block(n, 0, width, l.th.fg)
 	}
 	l.doc.height = l.y
@@ -871,6 +897,33 @@ func hasCheckBox(item gast.Node) bool {
 	return false
 }
 
+// expandTabs expands tabs to 4-column tab stops per line.
+func expandTabs(s string, w int) string {
+	if !strings.ContainsRune(s, '\t') {
+		return s
+	}
+	var sb strings.Builder
+	sb.Grow(len(s) + 16)
+	col := 0
+	for _, r := range s {
+		switch r {
+		case '\n':
+			sb.WriteByte('\n')
+			col = 0
+		case '\t':
+			n := w - col%w
+			for range n {
+				sb.WriteByte(' ')
+			}
+			col += n
+		default:
+			sb.WriteRune(r)
+			col += runeW(r)
+		}
+	}
+	return sb.String()
+}
+
 // code draws a fenced or indented code block, highlighted with chroma.
 func (l *mdLayout) code(n gast.Node, lang string, x, w int) {
 	th := l.th
@@ -879,7 +932,7 @@ func (l *mdLayout) code(n gast.Node, lang string, x, w int) {
 		s := n.Lines().At(i)
 		sb.Write(s.Value(l.src))
 	}
-	src := strings.TrimRight(strings.ReplaceAll(sb.String(), "\t", "    "), "\n")
+	src := strings.TrimRight(expandTabs(sb.String(), tabW), "\n")
 	lines := strings.Split(src, "\n")
 	px := l.codePx
 	asc, desc := l.a.tc.metrics(fMono, px)
@@ -945,7 +998,19 @@ func (l *mdLayout) code(n gast.Node, lang string, x, w int) {
 			if e <= s.start {
 				continue
 			}
-			l.add(mdItem{kind: miText, r: textAt(x+padX+cols[s.start]*charW, bl, bl+desc), s: string(rs[s.start:e]), f: monoFace(s.st), px: px, col: s.st.fg})
+			seg := rs[s.start:e]
+			wide := false
+			for _, r := range seg {
+				if runeW(r) > 1 {
+					wide = true
+					break
+				}
+			}
+			cell := charW
+			if wide {
+				cell = 0
+			}
+			l.add(mdItem{kind: miText, r: textAt(x+padX+cols[s.start]*charW, bl, bl+desc), s: string(seg), f: monoFace(s.st), px: px, cell: cell, col: s.st.fg})
 		}
 		y += lh
 	}
@@ -1192,7 +1257,8 @@ func (l *mdLayout) flow(runs []mdRun, x0, w, px, lh int, align xast.Alignment) i
 				}
 				acc += rw
 			}
-			s, sw = string(rs[start:]), acc
+			s = string(rs[start:])
+			sw = tc.width(f, rpx, s)
 		}
 		l.putText(s, st, f, rpx, x, baseline(), lh, y)
 		x += sw

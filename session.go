@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"cmp"
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
@@ -9,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 )
@@ -21,6 +23,7 @@ type sessionTab struct {
 	Col     int     `json:"col"`
 	Vy      float32 `json:"vy"`
 	Unsaved *string `json:"unsaved,omitempty"`
+	CRLF    bool    `json:"crlf,omitempty"`
 	Preview bool    `json:"preview,omitempty"`
 	Md      bool    `json:"md_preview,omitempty"`
 	MdVy    float32 `json:"md_vy,omitempty"`
@@ -57,7 +60,8 @@ func sessionPath(root string) string {
 
 func (a *App) sessionSignature() string {
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "%d|%v|%v|%v|%v|", a.active, a.showSidebar, a.fontSp, a.tree.showHidden, a.noWeb)
+	showHidden := a.tree != nil && a.tree.showHidden
+	fmt.Fprintf(&sb, "%d|%v|%v|%v|%v|", a.active, a.showSidebar, a.fontSp, showHidden, a.noWeb)
 	for _, b := range a.bufs {
 		fmt.Fprintf(&sb, "%s:%d:%v:%d:%v;", b.path, b.cur.L, b.dirty(), b.version, b.previewing())
 	}
@@ -73,16 +77,30 @@ func (a *App) saveSessionIfChanged() {
 	}
 }
 
-// autosaveSession is saveSessionIfChanged for the periodic tick: the
-// snapshot is taken here, but encoding and writing it (tens of ms for a
-// large unsaved file) happen off the UI goroutine.
+// pendingTab carries immutable line slices so text serialization can run off
+// the UI goroutine during periodic autosaves.
+type pendingTab struct {
+	idx   int
+	lines [][]rune
+	b64   []b64Span
+}
+
+// autosaveSession is saveSessionIfChanged for the periodic tick: only lightweight
+// slice headers are cloned on the UI goroutine; text serialization, JSON encoding
+// and disk I/O run off the UI goroutine.
 func (a *App) autosaveSession() {
 	if a.noSession {
 		return
 	}
 	if sig := a.sessionSignature(); sig != a.sessionSig {
-		seq, s := a.sessionSnapshot()
-		go a.writeSession(seq, s)
+		seq, s, pending := a.sessionSnapshotDeferred()
+		go func() {
+			for _, pt := range pending {
+				txt := textEncodedLines(pt.lines, pt.b64)
+				s.Tabs[pt.idx].Unsaved = &txt
+			}
+			a.writeSession(seq, s)
+		}()
 	}
 }
 
@@ -97,26 +115,63 @@ func (a *App) saveSession() {
 // sessionSnapshot captures the session on the UI goroutine. seq orders
 // snapshots so an older background write never replaces a newer file.
 func (a *App) sessionSnapshot() (uint64, sessionFile) {
+	seq, s, pending := a.sessionSnapshotDeferred()
+	for _, pt := range pending {
+		txt := textEncodedLines(pt.lines, pt.b64)
+		s.Tabs[pt.idx].Unsaved = &txt
+	}
+	return seq, s
+}
+
+func (a *App) sessionSnapshotDeferred() (uint64, sessionFile, []pendingTab) {
 	a.sessionSig = a.sessionSignature()
 	a.sessionSeq++
-	s := sessionFile{Root: a.root, Active: a.active, Sidebar: a.showSidebar, Width: a.sidebarDp, Font: a.fontSp, Dotfile: a.tree.showHidden, NoWeb: a.noWeb}
+	showHidden := a.tree != nil && a.tree.showHidden
+	s := sessionFile{Root: a.root, Active: a.active, Sidebar: a.showSidebar, Width: a.sidebarDp, Font: a.fontSp, Dotfile: showHidden, NoWeb: a.noWeb}
+	var pending []pendingTab
 	for _, b := range a.bufs {
-		t := sessionTab{Path: b.path, Line: b.cur.L + 1, Col: b.cur.C + 1, Vy: b.vy, Preview: b.preview, Md: b.previewing()}
+		t := sessionTab{Path: b.path, Line: b.cur.L + 1, Col: b.cur.C + 1, Vy: b.vy, CRLF: b.crlf, Preview: b.preview, Md: b.previewing()}
 		if t.Md {
 			t.MdVy = b.md.vy
 		}
 		if b.dirty() {
-			txt := b.textEncoded() // never store decoded base64
-			t.Unsaved = &txt
 			if !b.modTime.IsZero() {
 				t.DiskMod = b.modTime.UnixNano()
 			}
+			pending = append(pending, pendingTab{idx: len(s.Tabs), lines: slices.Clone(b.lines), b64: slices.Clone(b.b64)})
 		} else if b.path == "" {
 			continue
 		}
 		s.Tabs = append(s.Tabs, t)
 	}
-	return a.sessionSeq, s
+	return a.sessionSeq, s, pending
+}
+
+// textEncodedLines serializes lines with any decoded base64 spans re-encoded,
+// safely usable on a background goroutine because line slices are immutable.
+func textEncodedLines(lines [][]rune, spans []b64Span) string {
+	if len(spans) == 0 {
+		return textOf(lines)
+	}
+	offset := func(p Pos) int {
+		off := 0
+		for i := 0; i < p.L && i < len(lines); i++ {
+			off += len(lines[i]) + 1
+		}
+		return off + p.C
+	}
+	spans = slices.Clone(spans)
+	slices.SortFunc(spans, func(x, y b64Span) int { return cmp.Compare(offset(y.a), offset(x.a)) })
+	t := []rune(textOf(lines))
+	for _, sp := range spans {
+		ao, co := offset(sp.a), offset(sp.c)
+		if ao < 0 || co > len(t) || ao > co {
+			continue
+		}
+		out, _ := sp.encoded(string(t[ao:co]))
+		t = slices.Replace(t, ao, co, []rune(out)...)
+	}
+	return string(t)
 }
 
 func (a *App) writeSession(seq uint64, s sessionFile) {
@@ -131,12 +186,23 @@ func (a *App) writeSession(seq uint64, s sessionFile) {
 		return
 	}
 	p := sessionPath(s.Root)
-	os.MkdirAll(filepath.Dir(p), 0o700)
-	tmp := p + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err == nil {
-		if os.Rename(tmp, p) == nil {
-			os.WriteFile(lastRootFile(), []byte(s.Root+"\n"), 0o600)
-		}
+	dir := filepath.Dir(p)
+	os.MkdirAll(dir, 0o700)
+	f, err := os.CreateTemp(dir, ".session-*.tmp")
+	if err != nil {
+		return
+	}
+	tmp := f.Name()
+	_, werr := f.Write(data)
+	cerr := f.Close()
+	if werr != nil || cerr != nil {
+		os.Remove(tmp)
+		return
+	}
+	if os.Rename(tmp, p) == nil {
+		os.WriteFile(lastRootFile(), []byte(s.Root+"\n"), 0o600)
+	} else {
+		os.Remove(tmp)
 	}
 }
 
@@ -182,13 +248,20 @@ func (a *App) restoreSession(root string, unsavedOnly bool) {
 			}
 			b = a.buf()
 		}
-		if t.Unsaved != nil && *t.Unsaved != b.text() {
-			b.replaceRange(Pos{0, 0}, b.posFromOffset(1<<62), []rune(*t.Unsaved))
-			b.breakUndo()
-			if t.DiskMod != 0 && !b.modTime.IsZero() && b.modTime.UnixNano() != t.DiskMod {
-				b.conflict = true
+		if t.Unsaved != nil {
+			if *t.Unsaved != b.text() {
+				last := len(b.lines) - 1
+				b.replaceRange(Pos{0, 0}, Pos{last, len(b.lines[last])}, []rune(*t.Unsaved))
+				b.breakUndo()
+				if t.DiskMod != 0 && !b.modTime.IsZero() && b.modTime.UnixNano() != t.DiskMod {
+					b.conflict = true
+				}
+				restored++
 			}
-			restored++
+			if t.CRLF != b.crlf {
+				b.crlf = t.CRLF
+				b.metaDirty = true
+			}
 		}
 		if i == s.Active {
 			active = a.active
@@ -236,8 +309,30 @@ type ipcTarget struct {
 }
 
 // sendToRunning hands the targets to a running window for root, if any.
+// When root is empty and files are given, it first checks whether a running
+// project window owns any ancestor directory of the first file.
 func sendToRunning(root string, targets []target) bool {
-	c, err := net.DialTimeout("unix", socketPath(root), 300*time.Millisecond)
+	if root == "" && len(targets) > 0 {
+		dir := filepath.Dir(targets[0].path)
+		if r, err := filepath.EvalSymlinks(dir); err == nil {
+			dir = r
+		}
+		for {
+			if sendToSocket(socketPath(dir), targets) {
+				return true
+			}
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				break
+			}
+			dir = parent
+		}
+	}
+	return sendToSocket(socketPath(root), targets)
+}
+
+func sendToSocket(sock string, targets []target) bool {
+	c, err := net.DialTimeout("unix", sock, 300*time.Millisecond)
 	if err != nil {
 		return false
 	}
@@ -261,7 +356,18 @@ func (a *App) listen() {
 	if err != nil {
 		return
 	}
-	a.socket = p
+	a.mu.Lock()
+	select {
+	case <-a.done:
+		a.mu.Unlock()
+		l.Close()
+		os.Remove(p)
+		return
+	default:
+		a.socket = p
+		a.listener = l
+		a.mu.Unlock()
+	}
 	for {
 		c, err := l.Accept()
 		if err != nil {

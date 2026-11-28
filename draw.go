@@ -59,12 +59,15 @@ func monoFace(st tokStyle) face {
 // textCache shapes strings once and keeps the resulting vector paths as
 // reusable macros, so redrawing a frame is just replaying cached ops.
 type textCache struct {
-	sh     *text.Shaper
-	fonts  [nFaces]font.Font // what sh is queried with for each face
-	ready  chan struct{}     // closed once sh is built and warmed
-	m      map[textKey]*textEntry
-	glyphs []text.Glyph
-	met    map[[2]int][2]int
+	sh      *text.Shaper
+	fonts   [nFaces]font.Font // what sh is queried with for each face
+	ready   chan struct{}     // closed once sh is built and warmed
+	m       map[textKey]*textEntry
+	prev    map[textKey]*textEntry // previous generation, avoids cliff evictions
+	advMap  map[textKey]int        // width-only measurements (no vector path shaping)
+	advPrev map[textKey]int
+	glyphs  []text.Glyph
+	met     map[[2]int][2]int
 
 	// When sh is the quick shaper (see fonts.go), the full one follows
 	// on next once loadSystemFonts is called.
@@ -96,11 +99,14 @@ type textEntry struct {
 // few milliseconds; otherwise the system fonts are indexed first. invalidate
 // is called when the full shaper is ready to replace the quick one.
 func newTextCache(invalidate func()) *textCache {
+	return newTextCacheWithFonts(faceFonts, invalidate)
+}
+
+func newTextCacheWithFonts(fonts [nFaces]font.Font, invalidate func()) *textCache {
 	c := &textCache{
-		m: map[textKey]*textEntry{}, met: map[[2]int][2]int{},
+		m: map[textKey]*textEntry{}, advMap: map[textKey]int{}, met: map[[2]int][2]int{},
 		ready: make(chan struct{}), next: make(chan shaperSet, 1), wantFull: make(chan struct{}),
 	}
-	fonts := faceFonts // useOmarchyFont has already run
 	c.fonts = fonts
 	go func() {
 		coll := gofont.Collection()
@@ -142,7 +148,8 @@ func (c *textCache) upgrade() bool {
 	select {
 	case s := <-c.next:
 		c.sh, c.fonts = s.sh, s.fonts
-		c.m = map[textKey]*textEntry{}
+		c.m, c.prev = map[textKey]*textEntry{}, nil
+		c.advMap, c.advPrev = map[textKey]int{}, nil
 		c.met = map[[2]int][2]int{}
 		return true
 	default:
@@ -183,8 +190,13 @@ func (c *textCache) getCell(f face, px, cell int, s string) *textEntry {
 	if e, ok := c.m[k]; ok {
 		return e
 	}
-	if len(c.m) > 12000 {
-		c.m = map[textKey]*textEntry{}
+	if e, ok := c.prev[k]; ok {
+		c.m[k] = e
+		return e
+	}
+	if len(c.m) > 8000 {
+		c.prev = c.m
+		c.m = make(map[textKey]*textEntry, 1024)
 	}
 	sh := c.shaper()
 	sh.LayoutString(text.Parameters{
@@ -266,7 +278,35 @@ func (c *textCache) width(f face, px int, s string) int {
 	if s == "" {
 		return 0
 	}
-	return c.get(f, px, s).adv
+	k := textKey{s, f, px, 0}
+	if e, ok := c.m[k]; ok {
+		return e.adv
+	}
+	if w, ok := c.advMap[k]; ok {
+		return w
+	}
+	if w, ok := c.advPrev[k]; ok {
+		c.advMap[k] = w
+		return w
+	}
+	if len(c.advMap) > 16000 {
+		c.advPrev = c.advMap
+		c.advMap = make(map[textKey]int, 1024)
+	}
+	sh := c.shaper()
+	sh.LayoutString(text.Parameters{
+		Font:     c.fonts[f],
+		PxPerEm:  fixed.I(px),
+		MaxLines: 1,
+		MaxWidth: 1 << 24,
+	}, s)
+	var adv fixed.Int26_6
+	for g, ok := sh.NextGlyph(); ok; g, ok = sh.NextGlyph() {
+		adv += g.Advance
+	}
+	w := adv.Round()
+	c.advMap[k] = w
+	return w
 }
 
 // metrics returns ascent and descent in pixels for a face and size.

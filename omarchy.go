@@ -291,7 +291,7 @@ func monospaceFromFontconfig(conf string) string {
 		body := m[1]
 		test := strings.Index(body, "<test")
 		edit := strings.Index(body, "<edit")
-		if test < 0 || edit < 0 || !strings.Contains(body[test:edit], ">monospace<") {
+		if test < 0 || edit < 0 || edit < test || !strings.Contains(body[test:edit], ">monospace<") {
 			continue
 		}
 		if s := fcString.FindStringSubmatch(body[edit:]); s != nil {
@@ -301,17 +301,26 @@ func monospaceFromFontconfig(conf string) string {
 	return ""
 }
 
+// fontsWithFamily returns faceFonts with family prepended to each face, without
+// mutating the package-level faceFonts slice (safe across multiple windows).
+func fontsWithFamily(family string) [nFaces]font.Font {
+	fonts := faceFonts
+	if family == "" {
+		return fonts
+	}
+	prefix := family + ", "
+	for f := range fonts {
+		if !strings.HasPrefix(string(fonts[f].Typeface), prefix) {
+			fonts[f].Typeface = font.Typeface(prefix + string(fonts[f].Typeface))
+		}
+	}
+	return fonts
+}
+
 // useOmarchyFont puts the desktop font first for code, and for the UI too,
 // since Omarchy uses it as the system font.
 func useOmarchyFont(family string) {
-	if family == "" {
-		return
-	}
-	for f := range faceFonts {
-		ff := faceFonts[f]
-		ff.Typeface = font.Typeface(family + ", " + string(ff.Typeface))
-		faceFonts[f] = ff
-	}
+	faceFonts = fontsWithFamily(family)
 }
 
 // checkOmarchyTheme switches theme live when Omarchy's theme changes.

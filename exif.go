@@ -75,8 +75,11 @@ func orient(src image.Image, o int) image.Image {
 	}
 	b := src.Bounds()
 	w, h := b.Dx(), b.Dy()
-	in := image.NewRGBA(image.Rect(0, 0, w, h))
-	draw.Draw(in, in.Bounds(), src, b.Min, draw.Src)
+	in, ok := src.(*image.RGBA)
+	if !ok || b.Min != (image.Point{}) {
+		in = image.NewRGBA(image.Rect(0, 0, w, h))
+		draw.Draw(in, in.Bounds(), src, b.Min, draw.Src)
+	}
 	dw, dh := w, h
 	if o >= 5 {
 		dw, dh = h, w

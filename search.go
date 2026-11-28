@@ -86,7 +86,13 @@ func fuzzyScore(query, cand string) (int, []int) {
 	if query == "" {
 		return 0, nil
 	}
-	lc := strings.ToLower(cand)
+	return fuzzyScoreRunes([]rune(strings.ToLower(query)), query, cand)
+}
+
+func fuzzyScoreRunes(q []rune, rawQuery, cand string) (int, []int) {
+	if len(q) == 0 {
+		return 0, nil
+	}
 	base := strings.LastIndexByte(cand, '/') + 1
 	// Try to match as late as possible for the base name: simple greedy from start
 	// but prefer the base name when the whole query fits there.
@@ -94,23 +100,25 @@ func fuzzyScore(query, cand string) (int, []int) {
 		score := 0
 		var idx []int
 		qi := 0
-		prev := -2
-		q := []rune(strings.ToLower(query))
-		for i, r := range lc {
+		prevEnd := -1
+		var prevRune rune
+		for i, r := range cand {
+			w := utf8.RuneLen(r)
 			if i < from {
+				prevRune = r
 				continue
 			}
 			if qi >= len(q) {
 				break
 			}
-			if r == q[qi] {
+			if unicode.ToLower(r) == q[qi] {
 				s := 1
-				if i == prev+utf8.RuneLen(r) || i == prev+1 {
+				if i == prevEnd {
 					s += 5
 				}
-				if i == 0 || i == base || strings.ContainsRune("/_-. ", rune(cand[i-1])) {
+				if i == 0 || i == base || prevRune == '/' || prevRune == '_' || prevRune == '-' || prevRune == '.' || prevRune == ' ' {
 					s += 8
-				} else if unicode.IsUpper(rune(cand[i])) && !unicode.IsUpper(rune(cand[i-1])) {
+				} else if unicode.IsUpper(r) && !unicode.IsUpper(prevRune) {
 					s += 6
 				}
 				if i >= base {
@@ -118,9 +126,10 @@ func fuzzyScore(query, cand string) (int, []int) {
 				}
 				score += s
 				idx = append(idx, i)
-				prev = i
+				prevEnd = i + w
 				qi++
 			}
+			prevRune = r
 		}
 		return score, idx, qi == len(q)
 	}
@@ -134,7 +143,7 @@ func fuzzyScore(query, cand string) (int, []int) {
 		score, idx = s1+10, i1
 	}
 	score -= len(cand) / 8
-	if strings.EqualFold(cand[base:], query) {
+	if strings.EqualFold(cand[base:], rawQuery) {
 		score += 50
 	}
 	return score, idx
@@ -151,8 +160,9 @@ func fuzzyFilter(query string, files []string, limit int) []fuzzyHit {
 		}
 		return hits
 	}
+	q := []rune(strings.ToLower(query))
 	for _, f := range files {
-		if s, idx := fuzzyScore(query, f); s > -1 && idx != nil {
+		if s, idx := fuzzyScoreRunes(q, query, f); s > -1 && idx != nil {
 			hits = append(hits, fuzzyHit{f, s, idx})
 		}
 	}
@@ -277,7 +287,7 @@ func walkGrep(ctx context.Context, root, query string) ([]grepHit, bool) {
 			if c := bytes.Index(hay, q); c >= 0 {
 				t := string(line)
 				if len(t) > 400 {
-					t = t[:400]
+					t = strings.ToValidUTF8(t[:400], "")
 				}
 				hits = append(hits, grepHit{path: f, line: i + 1, col: c + 1, text: t})
 				if len(hits) >= maxGrepHits {

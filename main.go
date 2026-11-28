@@ -20,7 +20,7 @@ import (
 	"gioui.org/unit"
 )
 
-var version = "0.3.9"
+var version = "0.3.10"
 
 const defaultFontSp = 14
 
@@ -165,16 +165,17 @@ func openWindow(root string, targets []target) *App {
 	// Theme: an explicit --theme or TED_THEME wins; on Omarchy follow the
 	// desktop theme and font; otherwise the built-in default.
 	th := newTheme(cfg.theme)
+	fonts := faceFonts
 	var om *omarchyTheme
 	if !cfg.explicitTheme {
 		if om = loadOmarchyTheme(); om != nil {
 			if t := themeFromOmarchy(om); t != nil {
 				th = t
 			}
-			useOmarchyFont(omarchyFont())
+			fonts = fontsWithFamily(omarchyFont())
 		}
 	}
-	a := newApp(w, root, th, defaultFontSp)
+	a := newAppWithFonts(w, root, th, defaultFontSp, fonts)
 	a.omarchy, a.themeFixed = om, cfg.explicitTheme
 	a.noSession = cfg.wait
 	a.nativeTitlebar = cfg.nativeTitlebar
@@ -184,9 +185,7 @@ func openWindow(root string, targets []target) *App {
 	setup := make(chan struct{})
 	go func() {
 		err := a.loop(setup)
-		if a.socket != "" {
-			os.Remove(a.socket)
-		}
+		a.stop()
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "ted:", err)
 		}
@@ -250,6 +249,9 @@ func (a *App) loop(setup <-chan struct{}) error {
 				a.refreshGit()
 			}
 			a.focused = e.Config.Focused
+			a.mu.Lock()
+			a.focusedA = e.Config.Focused
+			a.mu.Unlock()
 		case app.FrameEvent:
 			gtx := app.NewContext(&ops, e)
 			if !a.tc.isReady() {
@@ -338,7 +340,8 @@ func detach() {
 		cmd.Dir = wd
 	}
 	os.MkdirAll(cacheDir(), 0o700)
-	if log, err := os.OpenFile(filepath.Join(cacheDir(), "ted.log"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600); err == nil {
+	if log, err := os.OpenFile(filepath.Join(cacheDir(), "ted.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err == nil {
+		defer log.Close()
 		cmd.Stdout, cmd.Stderr = log, log
 	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}

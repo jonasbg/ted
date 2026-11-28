@@ -4,11 +4,13 @@ import (
 	"context"
 	"fmt"
 	"image"
+	"io"
 	"runtime"
 	"strconv"
 	"strings"
 	"time"
 
+	"gioui.org/io/clipboard"
 	"gioui.org/io/event"
 	"gioui.org/io/key"
 	"gioui.org/io/pointer"
@@ -50,7 +52,7 @@ func (in *lineInput) key(e key.Event) (handled, changed bool) {
 	case key.NameLeftArrow:
 		in.all = false
 		switch {
-		case sc:
+		case sc && isMac:
 			in.cur = 0
 		case word:
 			in.cur = wordLeft(in.r, in.cur)
@@ -60,7 +62,7 @@ func (in *lineInput) key(e key.Event) (handled, changed bool) {
 	case key.NameRightArrow:
 		in.all = false
 		switch {
-		case sc:
+		case sc && isMac:
 			in.cur = len(in.r)
 		case word:
 			for in.cur < len(in.r) && !isWordRune(in.r[in.cur]) {
@@ -80,7 +82,7 @@ func (in *lineInput) key(e key.Event) (handled, changed bool) {
 		switch {
 		case in.all:
 			in.r, in.cur, in.all = in.r[:0], 0, false
-		case sc:
+		case sc && isMac:
 			in.r = in.r[in.cur:]
 			in.cur = 0
 		case word:
@@ -112,6 +114,22 @@ func (in *lineInput) key(e key.Event) (handled, changed bool) {
 		return false, false
 	default:
 		return false, false
+	}
+	return true, false
+}
+
+// copyCut handles Cmd/Ctrl+C and Cmd/Ctrl+X on a single-line input.
+func (in *lineInput) copyCut(gtx layout.Context, e key.Event) (handled, changed bool) {
+	if !e.Modifiers.Contain(key.ModShortcut) || (e.Name != "C" && e.Name != "X") {
+		return false, false
+	}
+	if len(in.r) == 0 {
+		return true, false
+	}
+	gtx.Execute(clipboard.WriteCmd{Type: "application/text", Data: io.NopCloser(strings.NewReader(string(in.r)))})
+	if e.Name == "X" {
+		in.r, in.cur, in.all = in.r[:0], 0, false
+		return true, true
 	}
 	return true, false
 }
@@ -352,6 +370,29 @@ func (o *Overlay) updateQuick(a *App) {
 	files := a.files
 	if o.scope == scopeOpen {
 		_, files = a.searchBufs()
+	} else if q == "" && len(a.bufs) > 0 {
+		// Prioritize open files at the top when the search box is empty.
+		seen := make(map[string]bool, len(a.bufs))
+		ordered := make([]string, 0, min(len(a.files)+len(a.bufs), 300))
+		for _, b := range a.bufs {
+			if b.path == "" || b.virtualKey != "" {
+				continue
+			}
+			rel := a.rel(b.path)
+			if !strings.HasPrefix(rel, "..") && !strings.HasPrefix(rel, "/") && !strings.HasPrefix(rel, "~") && !seen[rel] {
+				seen[rel] = true
+				ordered = append(ordered, rel)
+			}
+		}
+		for _, f := range a.files {
+			if len(ordered) >= 300 {
+				break
+			}
+			if !seen[f] {
+				ordered = append(ordered, f)
+			}
+		}
+		files = ordered
 	}
 	limit := 300
 	if q != "" {
@@ -406,7 +447,7 @@ func (o *Overlay) count() int {
 	return 0
 }
 
-func (a *App) overlayKey(e key.Event) {
+func (a *App) overlayKey(gtx layout.Context, e key.Event) {
 	o := a.overlay
 	if o.kind == ovConfirm {
 		switch e.Name {
@@ -442,6 +483,12 @@ func (a *App) overlayKey(e key.Event) {
 			o.scroll += 10
 		default:
 			a.closeOverlay()
+		}
+		return
+	}
+	if handled, changed := o.in.copyCut(gtx, e); handled {
+		if changed {
+			o.changed(a)
 		}
 		return
 	}
@@ -609,6 +656,9 @@ func (a *App) drawOverlay(gtx layout.Context) {
 					o.hover += n
 				}
 			}
+			continue
+		}
+		if e.Buttons != pointer.ButtonPrimary {
 			continue
 		}
 		if !pt.In(o.box) {
@@ -896,7 +946,7 @@ func (a *App) drawGrepRow(gtx layout.Context, o *Overlay, h grepHit, ir image.Re
 	}
 	cp := gtx.Sp(12.5)
 	avail := ir.Max.X - x - gtx.Dp(10)
-	if k := strings.Index(lt, lq); k >= 0 && lq != "" && len(lt) == len(text) {
+	if k := strings.Index(lt, lq); k >= 0 && lq != "" && len(lt) == len(text) && len(lq) == len(q) && k+len(q) <= len(text) {
 		pre, mid, post := text[:k], text[k:k+len(q)], text[k+len(q):]
 		// keep the match visible on long lines
 		if a.tc.width(fMono, cp, pre) > avail/2 {
@@ -951,14 +1001,21 @@ func (a *App) drawHighlighted(gtx layout.Context, f face, px, x, bl int, s strin
 // ---- find bar ----
 
 type FindBar struct {
-	in      lineInput
-	repl    lineInput
-	replace bool
-	field   int // 0 find, 1 replace
-	origin  Pos
-	info    string
-	box     image.Rectangle
-	tag     int
+	in       lineInput
+	repl     lineInput
+	replace  bool
+	field    int // 0 find, 1 replace
+	origin   Pos
+	info     string
+	box      image.Rectangle
+	btns     []findBtn
+	hoverBtn string
+	tag      int
+}
+
+type findBtn struct {
+	id string
+	r  image.Rectangle
 }
 
 func (a *App) openFind(replace bool) {
@@ -1084,11 +1141,19 @@ func (a *App) replaceOne() {
 	if len(q) == 0 {
 		return
 	}
-	if b.hasSel() && strings.EqualFold(string(b.selText()), string(q)) {
-		s, e := b.selRange()
-		end := b.replaceRange(s, e, append([]rune(nil), f.repl.r...))
-		b.cur = end
-		b.selecting = false
+	if b.hasSel() {
+		sel := string(b.selText())
+		qs := string(q)
+		matched := sel == qs
+		if !caseSensitive(q) {
+			matched = strings.EqualFold(sel, qs)
+		}
+		if matched {
+			s, e := b.selRange()
+			end := b.replaceRange(s, e, append([]rune(nil), f.repl.r...))
+			b.cur = end
+			b.selecting = false
+		}
 	}
 	a.findStep(true)
 }
@@ -1104,11 +1169,17 @@ func (a *App) replaceAllMatches() {
 	a.findUpdate()
 }
 
-func (a *App) findKey(e key.Event) {
+func (a *App) findKey(gtx layout.Context, e key.Event) {
 	f := a.find
 	in := &f.in
 	if f.field == 1 {
 		in = &f.repl
+	}
+	if handled, changed := in.copyCut(gtx, e); handled {
+		if changed && f.field == 0 {
+			a.findIncremental()
+		}
+		return
 	}
 	sc := e.Modifiers.Contain(key.ModShortcut)
 	switch e.Name {
@@ -1161,7 +1232,7 @@ func (a *App) drawFindBar(gtx layout.Context) {
 	f := a.find
 	r := a.ui.editor
 	rowH := gtx.Dp(34)
-	w := min(gtx.Dp(440), r.Dx()-gtx.Dp(40))
+	w := min(gtx.Dp(480), r.Dx()-gtx.Dp(40))
 	h := rowH + gtx.Dp(12)
 	if f.replace {
 		h += rowH + gtx.Dp(6)
@@ -1171,16 +1242,50 @@ func (a *App) drawFindBar(gtx layout.Context) {
 	f.box = image.Rect(x, y, x+w, y+h)
 
 	for {
-		ev, ok := gtx.Event(pointer.Filter{Target: &f.tag, Kinds: pointer.Press})
+		ev, ok := gtx.Event(pointer.Filter{Target: &f.tag, Kinds: pointer.Press | pointer.Move | pointer.Leave})
 		if !ok {
 			break
 		}
 		e := ev.(pointer.Event)
-		a.focus = focusFind
-		if e.Position.Y > float32(y+gtx.Dp(6)+rowH) && f.replace {
-			f.field = 1
-		} else {
-			f.field = 0
+		pt := image.Pt(int(e.Position.X), int(e.Position.Y))
+		hit := ""
+		for _, btn := range f.btns {
+			if pt.In(btn.r) {
+				hit = btn.id
+			}
+		}
+		switch e.Kind {
+		case pointer.Leave:
+			f.hoverBtn = ""
+		case pointer.Move:
+			f.hoverBtn = hit
+		case pointer.Press:
+			if e.Buttons != pointer.ButtonPrimary {
+				continue
+			}
+			switch hit {
+			case "prev":
+				a.findStep(false)
+				continue
+			case "next":
+				a.findStep(true)
+				continue
+			case "close":
+				a.closeFind()
+				return
+			case "one":
+				a.replaceOne()
+				continue
+			case "all":
+				a.replaceAllMatches()
+				continue
+			}
+			a.focus = focusFind
+			if e.Position.Y > float32(y+gtx.Dp(6)+rowH) && f.replace {
+				f.field = 1
+			} else {
+				f.field = 0
+			}
 		}
 	}
 
@@ -1192,32 +1297,59 @@ func (a *App) drawFindBar(gtx layout.Context) {
 	pointer.CursorText.Add(ops)
 	st.Pop()
 
+	f.btns = f.btns[:0]
+	drawBtn := func(id, label string, br image.Rectangle) {
+		f.btns = append(f.btns, findBtn{id, br})
+		bg, fg := th.panel2, th.dim
+		if f.hoverBtn == id {
+			bg = mixC(th.panel2, th.fg, 0.14)
+			fg = th.fg
+		}
+		rrect(ops, br, gtx.Dp(4), bg)
+		lw := a.tc.width(fUI, gtx.Sp(11.5), label)
+		a.tc.draw(ops, fUI, gtx.Sp(11.5), br.Min.X+(br.Dx()-lw)/2, a.uiBaseline(br.Min.Y, br.Dy()), label, fg)
+		handCursor(ops, br)
+	}
+
 	focused := a.focus == focusFind
-	infoW := gtx.Dp(90)
+	ctlW := gtx.Dp(156)
 	field := func(i int, in *lineInput, ry int, ph string) {
-		ir := image.Rect(x+gtx.Dp(8), ry, x+w-gtx.Dp(8)-infoW, ry+rowH)
+		ir := image.Rect(x+gtx.Dp(8), ry, x+w-gtx.Dp(8)-ctlW, ry+rowH)
 		rrect(ops, ir, gtx.Dp(5), th.bg)
 		if focused && f.field == i {
 			strokeRRect(ops, ir, gtx.Dp(5), 1, withA(th.accent, 0xc0))
 		}
 		a.drawInput(gtx, in, ir.Inset(gtx.Dp(8)), focused && f.field == i, ph)
 	}
-	field(0, &f.in, y+gtx.Dp(6), "Find")
+	r0y := y + gtx.Dp(6)
+	field(0, &f.in, r0y, "Find")
+	// Right-side controls for Find: match count, prev, next, close
+	bs := gtx.Dp(24)
+	by := r0y + (rowH-bs)/2
+	bx := x + w - gtx.Dp(8) - bs
+	drawBtn("close", "✕", image.Rect(bx, by, bx+bs, by+bs))
+	bx -= bs + gtx.Dp(4)
+	drawBtn("next", "↓", image.Rect(bx, by, bx+bs, by+bs))
+	bx -= bs + gtx.Dp(4)
+	drawBtn("prev", "↑", image.Rect(bx, by, bx+bs, by+bs))
 	col := th.dim
 	if f.info == "No results" {
 		col = th.errorFg
 	}
-	a.tc.draw(ops, fUI, gtx.Sp(12), x+w-infoW+gtx.Dp(4), a.uiBaseline(y+gtx.Dp(6), rowH), f.info, col)
+	infoAvail := bx - (x + w - ctlW) - gtx.Dp(6)
+	if infoAvail > gtx.Dp(20) {
+		a.tc.draw(ops, fUI, gtx.Sp(11.5), x+w-ctlW+gtx.Dp(2), a.uiBaseline(r0y, rowH), a.tc.truncate(fUI, gtx.Sp(11.5), infoAvail, f.info), col)
+	}
 	if f.replace {
 		ry := y + gtx.Dp(12) + rowH
 		field(1, &f.repl, ry, "Replace")
-		hint := "Enter: one"
-		a.tc.draw(ops, fUI, gtx.Sp(11), x+w-infoW+gtx.Dp(4), a.uiBaseline(ry, rowH/2+gtx.Dp(2)), hint, th.faint)
-		all := "⌘Enter: all"
-		if runtime.GOOS != "darwin" {
-			all = "Ctrl+Enter: all"
-		}
-		a.tc.draw(ops, fUI, gtx.Sp(11), x+w-infoW+gtx.Dp(4), a.uiBaseline(ry+rowH/2-gtx.Dp(2), rowH/2+gtx.Dp(2)), all, th.faint)
+		rby := ry + (rowH-bs)/2
+		allW := gtx.Dp(44)
+		oneW := gtx.Dp(64)
+		ax := x + w - gtx.Dp(8) - allW
+		drawBtn("all", "All", image.Rect(ax, rby, ax+allW, rby+bs))
+		ox := ax - gtx.Dp(6) - oneW
+		drawBtn("one", "Replace", image.Rect(ox, rby, ox+oneW, rby+bs))
 	}
 }
 
@@ -1236,13 +1368,17 @@ func helpRows() [][2]string {
 	if runtime.GOOS != "darwin" {
 		word = "Ctrl"
 	}
+	findNext := "F3 / Shift+F3"
+	if runtime.GOOS == "darwin" {
+		findNext = "Cmd+G / F3 (Shift+F3 prev)"
+	}
 	return [][2]string{
 		{"Files", ""},
 		{c + "+K", "Go to file and search text (Tab: folder / open tabs)"},
 		{c + "+O", "Open a path"},
 		{c + "+N", "New untitled scratch file (" + c + "+S names it)"},
-		{c + "+S", "Save"},
-		{c + "+W", "Close tab"},
+		{c + "+S / " + c + "+Shift+S", "Save / Save as"},
+		{c + "+W / " + c + "+Shift+T", "Close tab / Reopen closed tab"},
 		{"Ctrl+Tab", "Next tab (Shift for previous)"},
 		{c + "+1 … 9", "Go to tab"},
 		{"Alt+R", "Reload from disk (undoable)"},
@@ -1250,7 +1386,7 @@ func helpRows() [][2]string {
 		{"Search", ""},
 		{c + "+F", "Find in file"},
 		{c + "+Alt+F / " + c + "+H", "Replace"},
-		{c + "+G / F3", "Next match (Shift for previous)"},
+		{findNext, "Next / previous match"},
 		{c + "+D", "Select word, then next occurrence"},
 		{"Ctrl+G", "Go to line"},
 		{"Editing", ""},
